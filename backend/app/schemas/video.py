@@ -1,0 +1,11 @@
+from pydantic import BaseModel
+
+
+class VideoCreateRequest(BaseModel):
+    title: str
+    description: str | None = ""
+
+
+class VideoUploadResponse(BaseModel):
+    video_id: int
+    upload_url: str

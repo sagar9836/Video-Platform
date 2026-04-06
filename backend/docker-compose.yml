@@ -1,0 +1,163 @@
+services:
+  frontend:
+    build:
+      context: ../frontend
+      dockerfile: Dockerfile
+      args:
+        VITE_API_BASE_URL: ""
+    container_name: video-platform-frontend
+    depends_on:
+      api:
+        condition: service_started
+    ports:
+      - "3000:80"
+    restart: unless-stopped
+    networks:
+      - video_platform_net
+
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: video-platform-api
+    env_file:
+      - .env
+    environment:
+      DATABASE_URL: postgresql+asyncpg://postgres:postgres@postgres:5432/video_platform
+      KAFKA_BOOTSTRAP_SERVERS: kafka:29092
+      REDIS_URL: redis://redis:6379/0
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      LIVE_RTMP_URL: rtmp://localhost:1935/stream
+      LIVE_HLS_BASE_URL: http://localhost:8081/live
+    depends_on:
+      postgres:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+      redis:
+        condition: service_started
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=5)"]
+      interval: 15s
+      timeout: 10s
+      retries: 10
+      start_period: 20s
+    ports:
+      - "8000:8000"
+    restart: unless-stopped
+    networks:
+      - video_platform_net
+
+  ffmpeg:
+    build:
+      context: ./ffmpeg_service
+      dockerfile: Dockerfile
+    container_name: video-platform-ffmpeg
+    env_file:
+      - .env
+    environment:
+      DATABASE_URL: postgresql+asyncpg://postgres:postgres@postgres:5432/video_platform
+      KAFKA_BOOTSTRAP_SERVERS: kafka:29092
+      REDIS_URL: redis://redis:6379/0
+      S3_BUCKET: amz-video-stream-app
+      AWS_REGION: ap-south-1
+    depends_on:
+      postgres:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+      redis:
+        condition: service_started
+    restart: unless-stopped
+    networks:
+      - video_platform_net
+
+  postgres:
+    image: postgres:15
+    container_name: video-platform-postgres
+    environment:
+      POSTGRES_DB: video_platform
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+    ports:
+      - "5432:5432"
+    volumes:
+      - pg_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d video_platform"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+    networks:
+      - video_platform_net
+
+  redis:
+    image: redis:7
+    container_name: video-platform-redis
+    ports:
+      - "6379:6379"
+    restart: unless-stopped
+    networks:
+      - video_platform_net
+
+  zookeeper:
+    image: confluentinc/cp-zookeeper:7.5.0
+    container_name: video-platform-zookeeper
+    environment:
+      ZOOKEEPER_CLIENT_PORT: 2181
+      ZOOKEEPER_TICK_TIME: 2000
+    restart: unless-stopped
+    networks:
+      - video_platform_net
+
+  kafka:
+    image: confluentinc/cp-kafka:7.5.0
+    container_name: video-platform-kafka
+    depends_on:
+      zookeeper:
+        condition: service_started
+    environment:
+      KAFKA_BROKER_ID: 1
+      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
+      KAFKA_LISTENERS: INTERNAL://0.0.0.0:29092
+      KAFKA_ADVERTISED_LISTENERS: INTERNAL://kafka:29092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: INTERNAL:PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: INTERNAL
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
+    ports:
+      - "29092:29092"
+    healthcheck:
+      test: ["CMD-SHELL", "kafka-topics --bootstrap-server localhost:29092 --list || exit 1"]
+      interval: 10s
+      timeout: 10s
+      retries: 10
+    restart: unless-stopped
+    networks:
+      - video_platform_net
+
+  nginx-rtmp:
+    build:
+      context: ./nginx
+      dockerfile: Dockerfile
+    container_name: video-platform-nginx-rtmp
+    ports:
+      - "1935:1935"
+      - "8081:80"
+    volumes:
+      - ./hls:/opt/data/hls
+    depends_on:
+      api:
+        condition: service_started
+    restart: unless-stopped
+    networks:
+      - video_platform_net
+
+networks:
+  video_platform_net:
+    driver: bridge
+
+volumes:
+  pg_data:
