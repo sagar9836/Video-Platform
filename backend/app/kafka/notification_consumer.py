@@ -13,6 +13,7 @@ from app.kafka.topics import (
     LIVE_STARTED,
     VIDEO_PROCESSING_FAILED,
     VIDEO_READY,
+    VIDEO_PROCESSING_STARTED,
     VIDEO_UPLOADED,
 )
 from app.services.notification import notify_creator, notify_subscribers

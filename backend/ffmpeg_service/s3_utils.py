@@ -11,6 +11,16 @@ S3_CONNECT_TIMEOUT_SECONDS = 30
 S3_READ_TIMEOUT_SECONDS = 15 * 60
 DEFAULT_UPLOAD_WORKERS = 8
 
+
+# 🔥 FAIL FAST (CRITICAL)
+if not settings.aws_region:
+    raise ValueError("AWS_REGION is missing")
+
+if not settings.s3_bucket:
+    raise ValueError("S3_BUCKET is missing")
+
+
+# ✅ S3 CLIENT
 s3 = boto3.client(
     "s3",
     region_name=settings.aws_region,
@@ -22,18 +32,13 @@ s3 = boto3.client(
 )
 
 
+# ---------------- DOWNLOAD ----------------
 def download_from_s3(s3_key: str, local_path: str):
-    """
-    Download original MP4 from S3
-    """
-    s3.download_file(
-        settings.s3_bucket,
-        s3_key,
-        local_path,
-    )
+    s3.download_file(settings.s3_bucket, s3_key, local_path)
 
 
-def _upload_file(local_path: str, s3_key: str, content_type: str, cache_control: str) -> None:
+# ---------------- SINGLE UPLOAD ----------------
+def _upload_file(local_path: str, s3_key: str, content_type: str, cache_control: str):
     s3.upload_file(
         local_path,
         settings.s3_bucket,
@@ -45,8 +50,10 @@ def _upload_file(local_path: str, s3_key: str, content_type: str, cache_control:
     )
 
 
+# ---------------- THUMBNAIL ----------------
 def upload_thumbnail_to_s3(video_id: int, thumbnail_path: str) -> str:
     s3_key = f"videos/thumbnails/{video_id}/thumbnail.jpg"
+
     s3.upload_file(
         thumbnail_path,
         settings.s3_bucket,
@@ -56,12 +63,14 @@ def upload_thumbnail_to_s3(video_id: int, thumbnail_path: str) -> str:
             "CacheControl": "public, max-age=31536000, immutable",
         },
     )
+
     return s3_key
 
 
-def _iter_hls_uploads(video_id: int, hls_dir: str) -> list[tuple[str, str, str, str]]:
+# ---------------- HLS FILES ----------------
+def _iter_hls_uploads(video_id: int, hls_dir: str):
     prefix = f"videos/hls/{video_id}"
-    upload_jobs: list[tuple[str, str, str, str]] = []
+    jobs = []
 
     for root, _, files in os.walk(hls_dir):
         for file in sorted(files):
@@ -69,54 +78,38 @@ def _iter_hls_uploads(video_id: int, hls_dir: str) -> list[tuple[str, str, str, 
             s3_key = f"{prefix}/{file}"
 
             if file.endswith(".m3u8"):
-                content_type = "application/vnd.apple.mpegurl"
-                cache_control = "no-cache"
+                jobs.append((full_path, s3_key, "application/vnd.apple.mpegurl", "no-cache"))
             elif file.endswith(".ts"):
-                content_type = "video/MP2T"
-                cache_control = "public, max-age=31536000, immutable"
-            else:
-                continue
+                jobs.append((full_path, s3_key, "video/MP2T", "public, max-age=31536000, immutable"))
 
-            upload_jobs.append((full_path, s3_key, content_type, cache_control))
-
-    return upload_jobs
+    return jobs
 
 
-def upload_hls_to_s3(video_id: int, hls_dir: str, logger: Logger | None = None) -> int:
-    """
-    Upload HLS output (.m3u8 + .ts) to S3
-    with correct MIME types & caching
-    """
-    upload_jobs = _iter_hls_uploads(video_id, hls_dir)
-    if not upload_jobs:
-        raise ValueError(f"No HLS files found to upload for video {video_id}")
+# ---------------- PARALLEL UPLOAD ----------------
+def upload_hls_to_s3(video_id: int, hls_dir: str, logger: Logger | None = None):
+    jobs = _iter_hls_uploads(video_id, hls_dir)
 
-    max_workers = max(1, int(os.getenv("S3_UPLOAD_WORKERS", str(DEFAULT_UPLOAD_WORKERS))))
-    completed = 0
+    if not jobs:
+        raise ValueError(f"No HLS files found for video {video_id}")
+
+    workers = int(os.getenv("S3_UPLOAD_WORKERS", DEFAULT_UPLOAD_WORKERS))
 
     if logger:
-        logger.info(
-            "☁️ Uploading HLS output to S3 | video=%s | files=%s | workers=%s",
-            video_id,
-            len(upload_jobs),
-            max_workers,
-        )
+        logger.info(f"☁️ Uploading {len(jobs)} files with {workers} workers")
 
-    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+    completed = 0
+
+    with ThreadPoolExecutor(max_workers=workers) as executor:
         futures = [
-            executor.submit(_upload_file, full_path, s3_key, content_type, cache_control)
-            for full_path, s3_key, content_type, cache_control in upload_jobs
+            executor.submit(_upload_file, path, key, ctype, cache)
+            for path, key, ctype, cache in jobs
         ]
 
         for future in as_completed(futures):
             future.result()
             completed += 1
-            if logger and (completed == len(upload_jobs) or completed % 25 == 0):
-                logger.info(
-                    "☁️ HLS upload progress | video=%s | completed=%s/%s",
-                    video_id,
-                    completed,
-                    len(upload_jobs),
-                )
+
+            if logger and completed % 20 == 0:
+                logger.info(f"Progress: {completed}/{len(jobs)}")
 
     return completed
