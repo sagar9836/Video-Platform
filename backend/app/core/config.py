@@ -83,10 +83,13 @@ class Settings(BaseModel):
     smtp_username: str | None = None
     smtp_password: str | None = None
     smtp_use_tls: bool = True
+    smtp_use_ssl: bool = False
     email_from: str = "no-reply@videoplatform.local"
 
-    live_rtmp_url: str = "rtmp://localhost:1935/stream"
-    live_hls_base_url: str = "http://localhost:8081/live"
+    livekit_url: str = "ws://localhost:7880"
+    livekit_public_url: str | None = None
+    livekit_api_key: str = "devkey"
+    livekit_api_secret: str = "862176abb6dc458c91563e072725c6ff"
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -100,6 +103,7 @@ class Settings(BaseModel):
             "smtp_username": ("SMTP_USERNAME", "MAIL_USERNAME"),
             "smtp_password": ("SMTP_PASSWORD", "MAIL_PASSWORD"),
             "smtp_use_tls": ("SMTP_USE_TLS", "MAIL_STARTTLS"),
+            "smtp_use_ssl": ("SMTP_USE_SSL", "MAIL_SSL_TLS"),
             "email_from": ("EMAIL_FROM", "MAIL_FROM"),
         }
         model_fields = cast(dict[str, Any], getattr(cls, "model_fields", {}))
@@ -123,6 +127,8 @@ class Settings(BaseModel):
             data["debug"] = _coerce_debug(data["debug"])
         if "smtp_use_tls" in data:
             data["smtp_use_tls"] = _coerce_bool(data["smtp_use_tls"])
+        if "smtp_use_ssl" in data:
+            data["smtp_use_ssl"] = _coerce_bool(data["smtp_use_ssl"])
 
         return cls.model_validate(data)
 

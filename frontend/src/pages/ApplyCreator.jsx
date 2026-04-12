@@ -237,7 +237,7 @@ export default function ApplyCreator() {
               <Stack spacing={1.4}>
                 {[
                   "Upload videos and publish your first content",
-                  "Go live with OBS and your stream key",
+                  "Go live directly from the browser studio",
                   "Track views, watch activity, and subscriber growth",
                   "Build a public channel viewers can revisit",
                 ].map((item) => (

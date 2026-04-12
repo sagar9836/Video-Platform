@@ -9,6 +9,14 @@ export const uploadVideo = async (formData) => {
   return res.data;
 };
 
+export const createVideoUpload = async ({ title, description }) => {
+  const res = await api.post("/videos/upload", {
+    title,
+    description,
+  });
+  return res.data;
+};
+
 export const completeUpload = async ({ video_id }) => {
   const res = await api.post(`/videos/${video_id}/complete`);
   return res.data;
@@ -32,7 +40,22 @@ export const fetchAllVideos = async () => {
 export const fetchVideoDetails = async (video_id) => {
   const res = await api.get(`/videos/${video_id}`);
   return res.data;
-}
+};
+
+export const updateVideoVisibility = async ({ video_id, visibility }) => {
+  const res = await api.patch(`/videos/${video_id}/visibility`, { visibility });
+  return res.data;
+};
+
+export const deleteCreatorVideo = async ({ video_id }) => {
+  const res = await api.delete(`/videos/${video_id}`);
+  return res.data;
+};
+
+export const deleteAdminVideo = async ({ video_id }) => {
+  const res = await api.delete(`/admin/videos/${video_id}`);
+  return res.data;
+};
 
 /* ======================
    COMMENTS (NEW)

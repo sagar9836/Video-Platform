@@ -17,15 +17,23 @@ from app.models.analytics import VideoLike
 from app.models.comment import Comment
 from app.models.creator import Creator
 from app.models.creator_request import CreatorRequest, CreatorRequestStatus
+from app.models.live_session import LiveSession, LiveSessionStatus
+from app.models.premiere_session import PremiereSession, PremiereSessionStatus
 from app.models.subscription import Subscription
 from app.models.user import User, UserRole
-from app.models.video import Video, VideoStatus
+from app.models.video import Video, VideoStatus, VideoVisibility
 from app.models.video_analytics import VideoAnalytics
-from app.redis.client import redis_client
+from app.services.video_assets import build_video_play_url, build_video_thumbnail_url
 
 
 def _get_s3_client():
     return boto3.client("s3", region_name=settings.aws_region)
+
+
+def _utcnow():
+    from datetime import datetime, timezone
+
+    return datetime.now(timezone.utc)
 
 
 def _optional_user_from_request(request: Request) -> dict | None:
@@ -61,6 +69,17 @@ async def _subscription_state(
     return result.scalar_one_or_none() is not None
 
 
+async def _creator_for_user_id(
+    db: AsyncSession,
+    user_id: int | None,
+) -> Creator | None:
+    if not user_id:
+        return None
+
+    result = await db.execute(select(Creator).where(Creator.user_id == user_id))
+    return result.scalar_one_or_none()
+
+
 @strawberry.type
 class CreatorSummary:
     id: int
@@ -77,7 +96,9 @@ class VideoCard:
     description: str
     creator_id: int
     status: str
+    visibility: str
     play_url: Optional[str] = None
+    thumbnail_url: Optional[str] = None
 
 
 @strawberry.type
@@ -141,9 +162,7 @@ def _creator_summary(creator: Creator, videos_count: int) -> CreatorSummary:
 
 
 def _video_card(video: Video) -> VideoCard:
-    play_url = None
-    if video.status == VideoStatus.READY and settings.cloudfront_domain:
-        play_url = f"https://{settings.cloudfront_domain}/videos/hls/{video.id}/master.m3u8"
+    play_url = build_video_play_url(video.id) if video.status == VideoStatus.READY else None
 
     return VideoCard(
         id=video.id,
@@ -151,7 +170,22 @@ def _video_card(video: Video) -> VideoCard:
         description=video.description,
         creator_id=video.creator_id,
         status=video.status.value,
+        visibility=video.visibility.value,
         play_url=play_url,
+        thumbnail_url=build_video_thumbnail_url(video),
+    )
+
+
+def _premiere_is_live(premiere: PremiereSession | None) -> bool:
+    if not premiere:
+        return False
+
+    if premiere.status == PremiereSessionStatus.LIVE:
+        return True
+
+    return (
+        premiere.status == PremiereSessionStatus.SCHEDULED
+        and premiere.scheduled_start_at <= _utcnow()
     )
 
 
@@ -162,7 +196,10 @@ class Query:
         async with AsyncSessionLocal() as db:
             result = await db.execute(
                 select(Video)
-                .where(Video.status == VideoStatus.READY)
+                .where(
+                    Video.status == VideoStatus.READY,
+                    Video.visibility == VideoVisibility.PUBLIC,
+                )
                 .order_by(Video.id.desc())
             )
             videos = result.scalars().all()
@@ -184,18 +221,38 @@ class Query:
                 .where(
                     Video.creator_id == creator_id,
                     Video.status == VideoStatus.READY,
+                    Video.visibility == VideoVisibility.PUBLIC,
                 )
                 .order_by(Video.id.desc())
             )
             videos = videos_result.scalars().all()
 
-            live_state = await redis_client.get(f"live:{creator_id}:status")
             is_subscribed = await _subscription_state(db, viewer_id, creator_id)
+            live_session = await db.scalar(
+                select(LiveSession)
+                .where(LiveSession.creator_id == creator_id)
+                .order_by(LiveSession.id.desc())
+                .limit(1)
+            )
+            premiere_session = await db.scalar(
+                select(PremiereSession)
+                .where(
+                    PremiereSession.creator_id == creator_id,
+                    PremiereSession.status.in_(
+                        [PremiereSessionStatus.SCHEDULED, PremiereSessionStatus.LIVE]
+                    ),
+                )
+                .order_by(PremiereSession.scheduled_start_at.desc(), PremiereSession.id.desc())
+                .limit(1)
+            )
 
             return ChannelPageData(
                 channel=_creator_summary(creator, len(videos)),
                 videos=[_video_card(video) for video in videos],
-                is_live=live_state == "LIVE",
+                is_live=bool(
+                    (live_session and live_session.status == LiveSessionStatus.LIVE)
+                    or _premiere_is_live(premiere_session)
+                ),
                 is_subscribed=is_subscribed,
             )
 
@@ -210,12 +267,20 @@ class Query:
             if not video or video.status != VideoStatus.READY:
                 raise HTTPException(404, "Video not found")
 
+            viewer_creator = await _creator_for_user_id(db, viewer_id)
+            can_view_private_video = bool(
+                viewer_creator and viewer_creator.id == video.creator_id
+            )
+            if video.visibility == VideoVisibility.PRIVATE and not can_view_private_video:
+                raise HTTPException(404, "Video not found")
+
             creator = await db.get(Creator, video.creator_id)
             videos_count_result = await db.execute(
                 select(func.count(Video.id))
                 .where(
                     Video.creator_id == video.creator_id,
                     Video.status == VideoStatus.READY,
+                    Video.visibility == VideoVisibility.PUBLIC,
                 )
             )
             videos_count = cast(int, videos_count_result.scalar_one())
@@ -289,12 +354,31 @@ class Query:
                 select(Video).where(Video.creator_id == creator.id).order_by(Video.id.desc())
             )
             videos = videos_result.scalars().all()
-            live_state = await redis_client.get(f"live:{creator.id}:status")
+            live_session = await db.scalar(
+                select(LiveSession)
+                .where(LiveSession.creator_id == creator.id)
+                .order_by(LiveSession.id.desc())
+                .limit(1)
+            )
+            premiere_session = await db.scalar(
+                select(PremiereSession)
+                .where(
+                    PremiereSession.creator_id == creator.id,
+                    PremiereSession.status.in_(
+                        [PremiereSessionStatus.SCHEDULED, PremiereSessionStatus.LIVE]
+                    ),
+                )
+                .order_by(PremiereSession.scheduled_start_at.desc(), PremiereSession.id.desc())
+                .limit(1)
+            )
 
             return CreatorStudioData(
                 creator=_creator_summary(creator, len(videos)),
                 videos=[_video_card(video) for video in videos],
-                is_live=live_state == "LIVE",
+                is_live=bool(
+                    (live_session and live_session.status == LiveSessionStatus.LIVE)
+                    or _premiere_is_live(premiere_session)
+                ),
             )
 
     @strawberry.field

@@ -1,6 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
-import ContentCopyIcon from "@mui/icons-material/ContentCopy";
 import LiveTvIcon from "@mui/icons-material/LiveTv";
 import RadioButtonCheckedIcon from "@mui/icons-material/RadioButtonChecked";
 import RefreshIcon from "@mui/icons-material/Refresh";
@@ -8,7 +7,13 @@ import VideocamIcon from "@mui/icons-material/Videocam";
 
 import { createChannel } from "../../api/creator.api";
 import { fetchCreatorStudioGraphql } from "../../api/graphql.api";
-import { issueLiveStreamKey } from "../../api/live.api";
+import {
+  cancelPremiereSession,
+  endPremiereSession,
+  fetchMyPremiereSession,
+  schedulePremiereSession,
+} from "../../api/live.api";
+import { deleteCreatorVideo, updateVideoVisibility } from "../../api/video.api";
 import { useAuth } from "../../auth/AuthContext";
 import VideoCard from "../../components/common/VideoCard";
 
@@ -28,9 +33,9 @@ import {
 } from "@mui/material";
 
 const instructions = [
-  "Server URL: paste the RTMP URL into OBS Stream settings.",
-  "Stream key: keep it private and rotate it any time you think it has leaked.",
-  "Playback: once OBS starts publishing, viewers can open your live room instantly.",
+  "Open the browser live studio to preview your camera and microphone.",
+  "Go live to publish directly into the creator room over WebRTC.",
+  "Share the public room URL so viewers can join the live page instantly.",
 ];
 
 export default function CreatorStudio() {
@@ -42,21 +47,24 @@ export default function CreatorStudio() {
   const [videos, setVideos] = useState([]);
   const [loading, setLoading] = useState(true);
   const [savingChannel, setSavingChannel] = useState(false);
-  const [keyLoading, setKeyLoading] = useState(false);
   const [liveLoading, setLiveLoading] = useState(false);
   const [channelLoading, setChannelLoading] = useState(false);
   const [statusMessage, setStatusMessage] = useState("");
   const [error, setError] = useState("");
-  const [copiedField, setCopiedField] = useState("");
+  const [isLive, setIsLive] = useState(false);
+  const [premiere, setPremiere] = useState(null);
+  const [premiereVideoId, setPremiereVideoId] = useState("");
+  const [premiereTitle, setPremiereTitle] = useState("");
+  const [premiereDescription, setPremiereDescription] = useState("");
+  const [premiereStartAt, setPremiereStartAt] = useState("");
+  const [premiereSaving, setPremiereSaving] = useState(false);
+  const [premiereCancelling, setPremiereCancelling] = useState(false);
+  const [premiereEnding, setPremiereEnding] = useState(false);
+  const [visibilitySavingId, setVisibilitySavingId] = useState(null);
+  const [deletingVideoId, setDeletingVideoId] = useState(null);
 
   const [channelName, setChannelName] = useState("");
   const [description, setDescription] = useState("");
-
-  const [streamInfo, setStreamInfo] = useState({
-    rtmp_url: "",
-    stream_key: "",
-    live: false,
-  });
 
   const liveRoomUrl = useMemo(() => {
     if (!creator?.id) {
@@ -66,12 +74,27 @@ export default function CreatorStudio() {
   }, [creator?.id]);
 
   const loadStudio = async () => {
-    const data = await fetchCreatorStudioGraphql();
-    setVideos(data?.videos || []);
-    setStreamInfo((prev) => ({
-      ...prev,
-      live: Boolean(data?.isLive),
-    }));
+    const [data, premiereData] = await Promise.all([
+      fetchCreatorStudioGraphql(),
+      fetchMyPremiereSession().catch(() => ({ premiere: null })),
+    ]);
+    const nextVideos = data?.videos || [];
+    setVideos(nextVideos);
+    setIsLive(Boolean(data?.isLive));
+    setPremiere(premiereData?.premiere || null);
+    if (
+      !premiereVideoId ||
+      !nextVideos.some((video) => String(video.id) === String(premiereVideoId))
+    ) {
+      const firstReadyVideo = nextVideos.find(
+        (video) => String(video.status).toUpperCase() === "READY"
+      );
+      if (firstReadyVideo) {
+        setPremiereVideoId(String(firstReadyVideo.id));
+      } else {
+        setPremiereVideoId("");
+      }
+    }
   };
 
   useEffect(() => {
@@ -86,20 +109,30 @@ export default function CreatorStudio() {
       try {
         setLoading(true);
         setError("");
-        const data = await fetchCreatorStudioGraphql();
+        const [data, premiereData] = await Promise.all([
+          fetchCreatorStudioGraphql(),
+          fetchMyPremiereSession().catch(() => ({ premiere: null })),
+        ]);
         if (!mounted) {
           return;
         }
-        setVideos(data?.videos || []);
-        setStreamInfo((prev) => ({
-          ...prev,
-          live: Boolean(data?.isLive),
-        }));
+        const nextVideos = data?.videos || [];
+        setVideos(nextVideos);
+        setIsLive(Boolean(data?.isLive));
+        setPremiere(premiereData?.premiere || null);
+        if (
+          !premiereVideoId ||
+          !nextVideos.some((video) => String(video.id) === String(premiereVideoId))
+        ) {
+          const firstReadyVideo = nextVideos.find(
+            (video) => String(video.status).toUpperCase() === "READY"
+          );
+          setPremiereVideoId(firstReadyVideo ? String(firstReadyVideo.id) : "");
+        }
       } catch {
-        if (!mounted) {
-          return;
+        if (mounted) {
+          setError("Unable to load creator studio.");
         }
-        setError("Unable to load creator studio.");
       } finally {
         if (mounted) {
           setLoading(false);
@@ -141,26 +174,6 @@ export default function CreatorStudio() {
     }
   };
 
-  const handleIssueKey = async () => {
-    try {
-      setKeyLoading(true);
-      setError("");
-      setStatusMessage("");
-
-      const data = await issueLiveStreamKey();
-      setStreamInfo((prev) => ({
-        ...prev,
-        rtmp_url: data?.rtmp_url || "",
-        stream_key: data?.stream_key || "",
-      }));
-      setStatusMessage("A fresh stream key has been issued for your next live session.");
-    } catch (err) {
-      setError(err?.response?.data?.detail || "Failed to issue stream key.");
-    } finally {
-      setKeyLoading(false);
-    }
-  };
-
   const refreshLiveStatus = async () => {
     if (!creator?.id) {
       return;
@@ -189,17 +202,124 @@ export default function CreatorStudio() {
     }
   };
 
-  const copyText = async (label, value) => {
-    if (!value) {
+  const readyVideos = videos.filter((video) => String(video.status).toUpperCase() === "READY");
+
+  const handleSchedulePremiere = async () => {
+    if (!premiereVideoId || !premiereStartAt) {
+      setError("Choose a ready video and a fixed start time.");
       return;
     }
 
     try {
-      await navigator.clipboard.writeText(value);
-      setCopiedField(label);
-      window.setTimeout(() => setCopiedField(""), 1600);
-    } catch {
-      setError(`Unable to copy ${label}.`);
+      setPremiereSaving(true);
+      setError("");
+      setStatusMessage("");
+      const payload = {
+        video_id: Number(premiereVideoId),
+        scheduled_start_at: new Date(premiereStartAt).toISOString(),
+        ...(premiereTitle.trim() ? { title: premiereTitle.trim() } : {}),
+        ...(premiereDescription.trim() ? { description: premiereDescription.trim() } : {}),
+      };
+
+      const data = await schedulePremiereSession(payload);
+      setPremiere(data?.premiere || null);
+      setStatusMessage("Scheduled premiere saved. Your public live page will switch over at the chosen time.");
+    } catch (err) {
+      setError(err?.response?.data?.detail || "Unable to schedule the premiere.");
+    } finally {
+      setPremiereSaving(false);
+    }
+  };
+
+  const handleCancelPremiere = async () => {
+    if (!premiere?.id) {
+      return;
+    }
+
+    try {
+      setPremiereCancelling(true);
+      setError("");
+      await cancelPremiereSession(premiere.id);
+      setPremiere(null);
+      setStatusMessage("Scheduled premiere cancelled.");
+    } catch (err) {
+      setError(err?.response?.data?.detail || "Unable to cancel the premiere.");
+    } finally {
+      setPremiereCancelling(false);
+    }
+  };
+
+  const handleEndPremiere = async () => {
+    if (!premiere?.id) {
+      return;
+    }
+
+    try {
+      setPremiereEnding(true);
+      setError("");
+      await endPremiereSession(premiere.id);
+      setPremiere(null);
+      setStatusMessage("Premiere ended. The public live page will return to the normal channel state.");
+      await loadStudio();
+    } catch (err) {
+      setError(err?.response?.data?.detail || "Unable to end the premiere.");
+    } finally {
+      setPremiereEnding(false);
+    }
+  };
+
+  const handleVisibilityChange = async (videoId, nextVisibility) => {
+    try {
+      setVisibilitySavingId(videoId);
+      setError("");
+      await updateVideoVisibility({ video_id: videoId, visibility: nextVisibility });
+      setVideos((prev) =>
+        prev.map((video) =>
+          video.id === videoId ? { ...video, visibility: nextVisibility } : video
+        )
+      );
+      const toggledVideo = videos.find((video) => video.id === videoId);
+      setStatusMessage(
+        `${toggledVideo?.title || "Video"} is now ${String(nextVisibility).toLowerCase()}.`
+      );
+    } catch (err) {
+      setError(err?.response?.data?.detail || "Unable to update video visibility.");
+    } finally {
+      setVisibilitySavingId(null);
+    }
+  };
+
+  const handleDeleteVideo = async (videoId) => {
+    const targetVideo = videos.find((video) => video.id === videoId);
+    if (!targetVideo) {
+      return;
+    }
+
+    const confirmed = window.confirm(
+      `Delete "${targetVideo.title}"? This removes the source upload, processed HLS files, and thumbnail.`
+    );
+    if (!confirmed) {
+      return;
+    }
+
+    try {
+      setDeletingVideoId(videoId);
+      setError("");
+      await deleteCreatorVideo({ video_id: videoId });
+      const remainingVideos = videos.filter((video) => video.id !== videoId);
+      setVideos(remainingVideos);
+      setStatusMessage(`"${targetVideo.title}" was deleted.`);
+
+      if (String(premiereVideoId) === String(videoId)) {
+        const remainingReadyVideo = remainingVideos.find(
+          (video) => String(video.status).toUpperCase() === "READY"
+        );
+        setPremiereVideoId(remainingReadyVideo ? String(remainingReadyVideo.id) : "");
+      }
+    } catch (err) {
+      setError(err?.response?.data?.detail || "Unable to delete the video.");
+    } finally {
+      setDeletingVideoId(null);
     }
   };
 
@@ -293,9 +413,9 @@ export default function CreatorStudio() {
               <Stack direction="row" spacing={1} alignItems="center" sx={{ mb: 1.5 }}>
                 <Chip
                   icon={<RadioButtonCheckedIcon sx={{ color: "inherit !important" }} />}
-                  label={streamInfo.live ? "Broadcasting" : "Standby"}
+                  label={isLive ? "Broadcasting" : "Standby"}
                   sx={{
-                    bgcolor: streamInfo.live ? "#e6485c" : "rgba(255,255,255,0.14)",
+                    bgcolor: isLive ? "#e6485c" : "rgba(255,255,255,0.14)",
                     color: "#fff",
                     fontWeight: 700,
                   }}
@@ -308,8 +428,8 @@ export default function CreatorStudio() {
               </Typography>
 
               <Typography sx={{ mt: 1.5, maxWidth: 620, color: "rgba(255,246,237,0.84)" }}>
-                Launch your live room, rotate keys safely, and share one polished watch
-                page with your audience from a single dashboard.
+                Launch your room from the browser studio and send viewers into one clean
+                live page with a single live workflow.
               </Typography>
 
               <Stack direction={{ xs: "column", sm: "row" }} spacing={1.5} sx={{ mt: 3 }}>
@@ -325,7 +445,7 @@ export default function CreatorStudio() {
                     "&:hover": { bgcolor: "#ffe6cf" },
                   }}
                 >
-                  Start live setup
+                  Open live studio
                 </Button>
                 <Button
                   variant="outlined"
@@ -385,53 +505,15 @@ export default function CreatorStudio() {
           <Grid item xs={12} lg={7}>
             <Card sx={{ height: "100%", borderRadius: 5, boxShadow: "none", border: "1px solid rgba(56, 33, 25, 0.08)" }}>
               <CardContent sx={{ p: { xs: 3, md: 4 } }}>
-                <Stack
-                  direction={{ xs: "column", sm: "row" }}
-                  justifyContent="space-between"
-                  spacing={2}
-                >
+                <Stack spacing={2}>
                   <Box>
                     <Typography variant="h5" fontWeight={800}>
-                      Live setup
+                      Live workflow
                     </Typography>
                     <Typography color="text.secondary" sx={{ mt: 0.75 }}>
-                      Everything your encoder needs to publish a stream to the platform.
+                      The live architecture is now browser-first: preview locally,
+                      publish the room, and send viewers to the public page.
                     </Typography>
-                  </Box>
-
-                  <Button
-                    variant="contained"
-                    onClick={handleIssueKey}
-                    disabled={keyLoading}
-                    startIcon={<RefreshIcon />}
-                    sx={{ alignSelf: "flex-start" }}
-                  >
-                    {keyLoading ? "Rotating..." : "Rotate Key"}
-                  </Button>
-                </Stack>
-
-                <Stack spacing={2} sx={{ mt: 3 }}>
-                  <Box
-                    sx={{
-                      p: 2,
-                      borderRadius: 3,
-                      background: "#fbf6ef",
-                      border: "1px solid rgba(59, 34, 20, 0.08)",
-                    }}
-                  >
-                    <Typography fontWeight={700}>RTMP Server</Typography>
-                    <Typography sx={{ mt: 0.75, fontFamily: "monospace", wordBreak: "break-all" }}>
-                      {streamInfo.rtmp_url || "Issue a stream key to generate your ingest settings."}
-                    </Typography>
-                    <Button
-                      size="small"
-                      sx={{ mt: 1.5 }}
-                      startIcon={<ContentCopyIcon />}
-                      onClick={() => copyText("server url", streamInfo.rtmp_url)}
-                      disabled={!streamInfo.rtmp_url}
-                    >
-                      {copiedField === "server url" ? "Copied" : "Copy server"}
-                    </Button>
                   </Box>
 
                   <Box
@@ -442,36 +524,48 @@ export default function CreatorStudio() {
                       border: "1px solid rgba(59, 34, 20, 0.08)",
                     }}
                   >
-                    <Typography fontWeight={700}>Stream Key</Typography>
-                    <Typography sx={{ mt: 0.75, fontFamily: "monospace", wordBreak: "break-all" }}>
-                      {streamInfo.stream_key || "Issue a key to unlock live streaming."}
+                    <Typography fontWeight={700}>Creator studio</Typography>
+                    <Typography sx={{ mt: 0.75, color: "text.secondary" }}>
+                      Open the live studio to access your camera and microphone directly
+                      in the browser and publish into your room with one click.
                     </Typography>
-                    <Button
-                      size="small"
-                      sx={{ mt: 1.5 }}
-                      startIcon={<ContentCopyIcon />}
-                      onClick={() => copyText("stream key", streamInfo.stream_key)}
-                      disabled={!streamInfo.stream_key}
-                    >
-                      {copiedField === "stream key" ? "Copied" : "Copy key"}
-                    </Button>
+                  </Box>
+
+                  <Box
+                    sx={{
+                      p: 2,
+                      borderRadius: 3,
+                      background: "#fbf6ef",
+                      border: "1px solid rgba(59, 34, 20, 0.08)",
+                    }}
+                  >
+                    <Typography fontWeight={700}>Audience path</Typography>
+                    <Typography sx={{ mt: 0.75, color: "text.secondary", wordBreak: "break-all" }}>
+                      {liveRoomUrl}
+                    </Typography>
                   </Box>
 
                   <Box
                     sx={{
                       p: 2.25,
                       borderRadius: 3,
-                      background: streamInfo.live ? "#fff1f2" : "#f3f0ec",
+                      background: isLive ? "#fff1f2" : "#f3f0ec",
                       border: "1px solid rgba(59, 34, 20, 0.08)",
                     }}
                   >
                     <Typography fontWeight={700}>Broadcast status</Typography>
                     <Typography sx={{ mt: 0.75, color: "text.secondary" }}>
-                      {streamInfo.live
-                        ? "Your channel is live. Viewers can watch the stream page now."
-                        : "You are offline. Start publishing from OBS to go live."}
+                      {isLive
+                        ? "Your channel is live. Viewers can watch the room now."
+                        : "You are offline. Open the browser live studio when you're ready to broadcast."}
                     </Typography>
-                    {streamInfo.live && (
+                    {!isLive && premiere?.upcoming && (
+                      <Typography sx={{ mt: 1.25, color: "text.secondary" }}>
+                        Scheduled premiere: {premiere.title} at{" "}
+                        {new Date(premiere.scheduled_start_at).toLocaleString()}.
+                      </Typography>
+                    )}
+                    {isLive && (
                       <Button
                         component={Link}
                         to={`/live/${creator.id}`}
@@ -533,13 +627,6 @@ export default function CreatorStudio() {
                 </Typography>
                 <Stack direction={{ xs: "column", sm: "row" }} spacing={1.5} sx={{ mt: 2 }}>
                   <Button
-                    variant="outlined"
-                    startIcon={<ContentCopyIcon />}
-                    onClick={() => copyText("live room", liveRoomUrl)}
-                  >
-                    {copiedField === "live room" ? "Copied" : "Copy live room"}
-                  </Button>
-                  <Button
                     variant="text"
                     onClick={refreshChannelProfile}
                     disabled={channelLoading}
@@ -547,6 +634,115 @@ export default function CreatorStudio() {
                     {channelLoading ? "Refreshing..." : "Refresh profile"}
                   </Button>
                 </Stack>
+
+                <Divider sx={{ my: 3 }} />
+
+                <Typography fontWeight={700}>Schedule cloud video premiere</Typography>
+                <Typography color="text.secondary" sx={{ mt: 0.75 }}>
+                  Pick one of your processed uploads and send it live on the public page at a fixed time. Both public and private ready videos can be premiered here.
+                </Typography>
+
+                <TextField
+                  select
+                  fullWidth
+                  label="Ready video"
+                  value={premiereVideoId}
+                  onChange={(event) => setPremiereVideoId(event.target.value)}
+                  SelectProps={{ native: true }}
+                  sx={{ mt: 2 }}
+                  disabled={premiereSaving || readyVideos.length === 0}
+                >
+                  <option value="">
+                    {readyVideos.length === 0 ? "No ready videos available" : "Select a video"}
+                  </option>
+                  {readyVideos.map((video) => (
+                    <option key={video.id} value={video.id}>
+                      {video.title} ({String(video.visibility || "PUBLIC").toLowerCase()})
+                    </option>
+                  ))}
+                </TextField>
+
+                <TextField
+                  label="Premiere title"
+                  fullWidth
+                  value={premiereTitle}
+                  onChange={(event) => setPremiereTitle(event.target.value)}
+                  sx={{ mt: 2 }}
+                  placeholder="Leave blank to reuse the video title"
+                />
+
+                <TextField
+                  label="Premiere description"
+                  fullWidth
+                  multiline
+                  minRows={3}
+                  value={premiereDescription}
+                  onChange={(event) => setPremiereDescription(event.target.value)}
+                  sx={{ mt: 2 }}
+                  placeholder="Leave blank to reuse the video description"
+                />
+
+                <TextField
+                  label="Start time"
+                  type="datetime-local"
+                  fullWidth
+                  value={premiereStartAt}
+                  onChange={(event) => setPremiereStartAt(event.target.value)}
+                  sx={{ mt: 2 }}
+                  InputLabelProps={{ shrink: true }}
+                />
+
+                <Stack direction={{ xs: "column", sm: "row" }} spacing={1.5} sx={{ mt: 2 }}>
+                  <Button
+                    variant="contained"
+                    onClick={handleSchedulePremiere}
+                    disabled={premiereSaving || readyVideos.length === 0}
+                  >
+                    {premiereSaving ? "Saving..." : "Schedule premiere"}
+                  </Button>
+                  {premiere?.id && premiere?.upcoming && (
+                    <Button
+                      variant="outlined"
+                      color="inherit"
+                      onClick={handleCancelPremiere}
+                      disabled={premiereCancelling}
+                    >
+                      {premiereCancelling ? "Cancelling..." : "Cancel premiere"}
+                    </Button>
+                  )}
+                  {premiere?.id && premiere?.live && (
+                    <Button
+                      variant="outlined"
+                      color="error"
+                      onClick={handleEndPremiere}
+                      disabled={premiereEnding}
+                    >
+                      {premiereEnding ? "Ending..." : "End premiere"}
+                    </Button>
+                  )}
+                </Stack>
+
+                {premiere && premiere.status !== "CANCELLED" && (
+                  <Box
+                    sx={{
+                      mt: 2,
+                      p: 2,
+                      borderRadius: 3,
+                      background: "#fbf6ef",
+                      border: "1px solid rgba(59, 34, 20, 0.08)",
+                    }}
+                  >
+                    <Typography fontWeight={700}>{premiere.title}</Typography>
+                    <Typography sx={{ mt: 0.75, color: "text.secondary" }}>
+                      {premiere.live
+                        ? "Premiere is live now."
+                        : `Starts at ${new Date(premiere.scheduled_start_at).toLocaleString()}`}
+                    </Typography>
+                    <Typography sx={{ mt: 0.75, color: "text.secondary" }}>
+                      Viewers will join through {liveRoomUrl} and watch the uploaded cloud video as a scheduled live event.
+                    </Typography>
+                  </Box>
+                )}
               </CardContent>
             </Card>
           </Grid>
@@ -566,7 +762,7 @@ export default function CreatorStudio() {
                   Your videos
                 </Typography>
                 <Typography color="text.secondary" sx={{ mt: 0.75 }}>
-                  Manage your on-demand catalog alongside live programming.
+                  Manage your on-demand catalog alongside live programming. Public videos appear for your audience; private videos stay visible only here in studio.
                 </Typography>
               </Box>
 
@@ -593,7 +789,86 @@ export default function CreatorStudio() {
               <Grid container spacing={3}>
                 {videos.map((video) => (
                   <Grid item key={video.id} xs={12} sm={6} md={4} lg={3}>
-                    <VideoCard video={video} />
+                    <Stack spacing={1.5}>
+                      <VideoCard video={video} />
+                      <Box
+                        sx={{
+                          p: 1.5,
+                          borderRadius: 3,
+                          background: "#fbf7f2",
+                          border: "1px solid rgba(56, 33, 25, 0.08)",
+                        }}
+                      >
+                        <Stack direction="row" spacing={1} alignItems="center" flexWrap="wrap">
+                          <Chip
+                            size="small"
+                            label={String(video.visibility || "PUBLIC").toLowerCase()}
+                            sx={{
+                              bgcolor:
+                                String(video.visibility || "PUBLIC").toUpperCase() === "PRIVATE"
+                                  ? "rgba(212, 127, 48, 0.16)"
+                                  : "rgba(21, 101, 192, 0.10)",
+                              color: "#3f2a21",
+                              fontWeight: 700,
+                            }}
+                          />
+                          <Chip
+                            size="small"
+                            label={String(video.status || "").toLowerCase()}
+                            sx={{ bgcolor: "rgba(56, 33, 25, 0.08)", color: "#3f2a21", fontWeight: 700 }}
+                          />
+                        </Stack>
+                        <Stack direction="row" spacing={1} sx={{ mt: 1.25 }}>
+                          <Button
+                            size="small"
+                            variant={
+                              String(video.visibility || "PUBLIC").toUpperCase() === "PUBLIC"
+                                ? "outlined"
+                                : "contained"
+                            }
+                            onClick={() => handleVisibilityChange(video.id, "PUBLIC")}
+                            disabled={
+                              visibilitySavingId === video.id ||
+                              String(video.visibility || "PUBLIC").toUpperCase() === "PUBLIC"
+                            }
+                          >
+                            {visibilitySavingId === video.id &&
+                            String(video.visibility || "PUBLIC").toUpperCase() !== "PUBLIC"
+                              ? "Saving..."
+                              : "Make public"}
+                          </Button>
+                          <Button
+                            size="small"
+                            variant={
+                              String(video.visibility || "PUBLIC").toUpperCase() === "PRIVATE"
+                                ? "outlined"
+                                : "contained"
+                            }
+                            color="inherit"
+                            onClick={() => handleVisibilityChange(video.id, "PRIVATE")}
+                            disabled={
+                              visibilitySavingId === video.id ||
+                              String(video.visibility || "PUBLIC").toUpperCase() === "PRIVATE"
+                            }
+                          >
+                            {visibilitySavingId === video.id &&
+                            String(video.visibility || "PUBLIC").toUpperCase() !== "PRIVATE"
+                              ? "Saving..."
+                              : "Make private"}
+                          </Button>
+                        </Stack>
+                        <Button
+                          size="small"
+                          color="error"
+                          variant="outlined"
+                          sx={{ mt: 1.25 }}
+                          onClick={() => handleDeleteVideo(video.id)}
+                          disabled={deletingVideoId === video.id}
+                        >
+                          {deletingVideoId === video.id ? "Deleting..." : "Delete video"}
+                        </Button>
+                      </Box>
+                    </Stack>
                   </Grid>
                 ))}
               </Grid>

@@ -22,7 +22,9 @@ export const fetchDashboardFeedGraphql = async () => {
         description
         creatorId
         status
+        visibility
         playUrl
+        thumbnailUrl
       }
     }
   `);
@@ -50,7 +52,9 @@ export const fetchChannelPageGraphql = async (creatorId) => {
             description
             creatorId
             status
+            visibility
             playUrl
+            thumbnailUrl
           }
         }
       }
@@ -116,7 +120,9 @@ export const fetchCreatorStudioGraphql = async () => {
           description
           creatorId
           status
+          visibility
           playUrl
+          thumbnailUrl
         }
       }
     }

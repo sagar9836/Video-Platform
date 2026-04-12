@@ -16,6 +16,8 @@ export default function VideoCard({ video }) {
 
   const status = String(video.status || "").toLowerCase();
   const isReady = status === "ready";
+  const visibility = String(video.visibility || "PUBLIC").toLowerCase();
+  const isPrivate = visibility === "private";
 
   const handleClick = () => {
     if (!isReady) return;
@@ -46,6 +48,7 @@ export default function VideoCard({ video }) {
           component="img"
           image={
             video.thumbnail_url ||
+            video.thumbnailUrl ||
             `https://images.unsplash.com/photo-1492619375914-88005aa9e8fb?auto=format&fit=crop&w=1200&q=80`
           }
           alt={video.title}
@@ -100,16 +103,28 @@ export default function VideoCard({ video }) {
             {video.creatorName || "VideoPlatform creator"}
           </Typography>
 
-          <Chip
-            size="small"
-            label={isReady ? "Watch" : "Preparing"}
-            sx={{
-              width: "fit-content",
-              bgcolor: "rgba(255,255,255,0.06)",
-              color: "rgba(255,255,255,0.88)",
-              border: "1px solid rgba(255,255,255,0.08)",
-            }}
-          />
+          <Stack direction="row" spacing={1} flexWrap="wrap">
+            <Chip
+              size="small"
+              label={isReady ? "Watch" : "Preparing"}
+              sx={{
+                width: "fit-content",
+                bgcolor: "rgba(255,255,255,0.06)",
+                color: "rgba(255,255,255,0.88)",
+                border: "1px solid rgba(255,255,255,0.08)",
+              }}
+            />
+            <Chip
+              size="small"
+              label={isPrivate ? "Private" : "Public"}
+              sx={{
+                width: "fit-content",
+                bgcolor: isPrivate ? "rgba(212, 127, 48, 0.16)" : "rgba(255,255,255,0.06)",
+                color: "rgba(255,255,255,0.88)",
+                border: "1px solid rgba(255,255,255,0.08)",
+              }}
+            />
+          </Stack>
         </Stack>
       </CardContent>
     </Card>

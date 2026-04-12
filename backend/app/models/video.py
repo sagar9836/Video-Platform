@@ -6,10 +6,16 @@ from app.db.base import Base
 
 
 class VideoStatus(str, enum.Enum):
+    AWAITING_UPLOAD = "AWAITING_UPLOAD"
     UPLOADED = "UPLOADED"
     PROCESSING = "PROCESSING"
     READY = "READY"
     FAILED = "FAILED"
+
+
+class VideoVisibility(str, enum.Enum):
+    PUBLIC = "PUBLIC"
+    PRIVATE = "PRIVATE"
 
 
 class Video(Base):
@@ -20,10 +26,16 @@ class Video(Base):
     title: Mapped[str] = mapped_column(String)
     description: Mapped[str] = mapped_column(String, default="")
     s3_key: Mapped[str] = mapped_column(String, unique=True)
+    thumbnail_key: Mapped[str | None] = mapped_column(String, nullable=True)
 
     status: Mapped[VideoStatus] = mapped_column(
-        Enum(VideoStatus),
-        default=VideoStatus.UPLOADED,
+        Enum(VideoStatus, native_enum=False),
+        default=VideoStatus.AWAITING_UPLOAD,
+    )
+    visibility: Mapped[VideoVisibility] = mapped_column(
+        Enum(VideoVisibility, native_enum=False),
+        default=VideoVisibility.PUBLIC,
+        server_default=VideoVisibility.PUBLIC.value,
     )
 
     # 🔥 ADD THESE ONLY

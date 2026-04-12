@@ -24,7 +24,12 @@ import LiveWatch from "../pages/live/LiveWatch";
 
 /* ADMIN */
 import AdminLayout from "../layouts/AdminLayout";
+import Comments from "../pages/admin/Comments";
+import CreatorRequests from "../pages/admin/CreatorRequests";
 import AdminDashboard from "../pages/admin/AdminDashboard";
+import Reports from "../pages/admin/Reports";
+import Users from "../pages/admin/Users";
+import Videos from "../pages/admin/Videos";
 
 function App() {
   const { isAuthenticated } = useAuth();
@@ -89,13 +94,7 @@ function App() {
         {/* PUBLIC CHANNEL */}
         <Route
           path="/channel/:creatorId"
-          element={
-            isAuthenticated ? (
-              <ChannelPage />
-            ) : (
-              <Navigate to="/login" replace />
-            )
-          }
+          element={<ChannelPage />}
         />
 
         {/* VIDEO */}
@@ -122,6 +121,11 @@ function App() {
           }
         >
           <Route index element={<AdminDashboard />} />
+          <Route path="creator-requests" element={<CreatorRequests />} />
+          <Route path="users" element={<Users />} />
+          <Route path="videos" element={<Videos />} />
+          <Route path="comments" element={<Comments />} />
+          <Route path="reports" element={<Reports />} />
         </Route>
 
         {/* FALLBACK */}

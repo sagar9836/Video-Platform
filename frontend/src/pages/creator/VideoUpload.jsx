@@ -1,6 +1,8 @@
-import { useMemo, useState } from "react";
+import { useMemo, useState, useEffect } from "react";
 import { useNavigate } from "react-router-dom";
-import api from "../../api/axios";
+import axios from "axios";
+
+import { completeUpload, createVideoUpload, uploadVideo, videoStatus } from "../../api/video.api";
 
 import {
   Alert,
@@ -41,6 +43,37 @@ export default function VideoUpload() {
   const [error, setError] = useState("");
   const [message, setMessage] = useState("");
   const [stage, setStage] = useState("idle");
+  const [uploadPercent, setUploadPercent] = useState(0);
+  const [processingVideoId, setProcessingVideoId] = useState(null);
+  const [processingStatus, setProcessingStatus] = useState(null);
+
+  // Poll processing status
+  useEffect(() => {
+    if (!processingVideoId) return;
+
+    const pollStatus = async () => {
+      try {
+        const status = await videoStatus({ video_id: processingVideoId });
+        setProcessingStatus(status);
+
+        if (status.status === "READY") {
+          setMessage("Video processing complete! Your video is now ready to watch.");
+          setTimeout(() => navigate("/creator"), 2000);
+        } else if (status.status === "FAILED") {
+          setError(`Processing failed: ${status.error || "Unknown error"}`);
+          setStage("idle");
+          setProcessingVideoId(null);
+        }
+      } catch (err) {
+        console.error("Status polling error:", err);
+      }
+    };
+
+    pollStatus();
+    const interval = setInterval(pollStatus, 3000); // Poll every 3 seconds
+
+    return () => clearInterval(interval);
+  }, [processingVideoId, navigate]);
 
   const fileSummary = useMemo(() => {
     if (!file) return null;
@@ -50,6 +83,34 @@ export default function VideoUpload() {
       type: file.type || "video/*",
     };
   }, [file]);
+
+  const buildUploadErrorMessage = (err, fallbackMessage) => {
+    if (err?.response?.data?.detail) {
+      return err.response.data.detail;
+    }
+
+    if (err?.message) {
+      return err.message;
+    }
+
+    return fallbackMessage;
+  };
+
+  const uploadViaBackendFallback = async ({ videoId }) => {
+    const formData = new FormData();
+    formData.append("title", title.trim());
+    formData.append("description", description);
+    formData.append("file", file);
+    if (videoId) {
+      formData.append("video_id", String(videoId));
+    }
+
+    setStage("uploading");
+    setMessage("Direct upload fallback is running because browser-to-S3 upload is blocked.");
+    setUploadPercent(20);
+
+    return uploadVideo(formData);
+  };
 
   const upload = async () => {
     if (!title.trim() || !file) {
@@ -61,31 +122,85 @@ export default function VideoUpload() {
       setLoading(true);
       setError("");
       setMessage("");
+      setUploadPercent(0);
 
-      setStage("uploading");
-      const formData = new FormData();
-      formData.append("title", title.trim());
-      formData.append("description", description);
-      formData.append("file", file);
+      setStage("requesting");
+      const uploadSession = await createVideoUpload({
+        title: title.trim(),
+        description,
+      });
 
-      const res = await api.post("/videos/upload-direct", formData);
+      try {
+        setStage("uploading");
+        await axios.put(uploadSession.upload_url, file, {
+          timeout: 30 * 60 * 1000,
+          maxBodyLength: Infinity,
+          maxContentLength: Infinity,
+          onUploadProgress: (progressEvent) => {
+            if (!progressEvent.total) {
+              return;
+            }
 
-      setStage("processing");
+            setUploadPercent(
+              Math.max(
+                5,
+                Math.min(95, Math.round((progressEvent.loaded / progressEvent.total) * 100))
+              )
+            );
+          },
+        });
+      } catch {
+        const fallbackResponse = await uploadViaBackendFallback({
+          videoId: uploadSession.video_id,
+        });
+        setStage("processing");
+        setUploadPercent(100);
+        setMessage(
+          fallbackResponse?.detail ||
+            "Browser upload to S3 was blocked, so the app used the server upload path instead."
+        );
+        setTimeout(() => navigate("/creator"), 1500);
+        return;
+      }
+
+      let res;
+      try {
+        setStage("processing");
+        setUploadPercent(100);
+        res = await completeUpload({ video_id: uploadSession.video_id });
+        setProcessingVideoId(uploadSession.video_id);
+        setMessage("Upload complete! Processing your video...");
+      } catch (err) {
+        throw new Error(
+          buildUploadErrorMessage(
+            err,
+            "The file uploaded, but processing could not be started. Please retry in a moment."
+          )
+        );
+      }
+
       setMessage(
-        res.data?.detail ||
+        res?.detail ||
           "Upload submitted successfully. Your video is now being processed."
       );
       setTimeout(() => navigate("/creator"), 1500);
     } catch (err) {
-      setError(err?.response?.data?.detail || "Upload failed");
+      setError(err?.message || err?.response?.data?.detail || "Upload failed");
       setStage("idle");
+      setUploadPercent(0);
     } finally {
       setLoading(false);
     }
   };
 
   const stageProgress =
-    stage === "requesting" ? 20 : stage === "uploading" ? 65 : stage === "processing" ? 100 : 0;
+    stage === "requesting"
+      ? 15
+      : stage === "uploading"
+        ? uploadPercent
+        : stage === "processing"
+          ? 100
+          : 0;
 
   return (
     <Box
@@ -149,6 +264,7 @@ export default function VideoUpload() {
                   "Use a clear title that explains the video instantly",
                   "Keep descriptions short, specific, and searchable",
                   "Upload your highest-quality source file",
+                  "A thumbnail is generated automatically during processing",
                   "After upload, processing starts automatically",
                 ].map((item) => (
                   <Box
@@ -270,10 +386,12 @@ export default function VideoUpload() {
                       {stage === "requesting"
                         ? "Preparing upload"
                         : stage === "uploading"
-                          ? "Uploading source"
-                          : stage === "processing"
-                            ? "Starting processing"
-                            : "Idle"}
+                          ? `Uploading source${uploadPercent ? ` (${uploadPercent}%)` : ""}`
+                          : stage === "processing" && processingVideoId
+                            ? `Processing: ${processingStatus?.status || "Checking..."}`
+                            : stage === "processing"
+                              ? "Starting processing"
+                              : "Idle"}
                     </Typography>
                   </Stack>
                   <LinearProgress
@@ -315,6 +433,31 @@ export default function VideoUpload() {
                   }}
                 >
                   {message}
+                </Alert>
+              )}
+
+              {processingVideoId && processingStatus && processingStatus.status !== "READY" && (
+                <Alert
+                  severity="info"
+                  sx={{
+                    borderRadius: 3,
+                    bgcolor: "rgba(33,150,243,0.18)",
+                    color: "#fff",
+                  }}
+                >
+                  <Stack spacing={1}>
+                    <Typography fontWeight={600}>
+                      Processing Status: {processingStatus.status}
+                    </Typography>
+                    {processingStatus.error && (
+                      <Typography variant="body2" sx={{ opacity: 0.8 }}>
+                        Error: {processingStatus.error}
+                      </Typography>
+                    )}
+                    <Typography variant="body2" sx={{ opacity: 0.8 }}>
+                      Checking status every 3 seconds...
+                    </Typography>
+                  </Stack>
                 </Alert>
               )}
 

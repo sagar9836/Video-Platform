@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import api from "../../api/axios";
+import { deleteAdminVideo } from "../../api/video.api";
 import {
   Box,
   Typography,
@@ -28,6 +29,18 @@ function Videos() {
     loadVideos();
   };
 
+  const removeVideo = async (id, title) => {
+    const confirmed = window.confirm(
+      `Delete "${title}"? This removes the source video, processed HLS files, and thumbnail.`
+    );
+    if (!confirmed) {
+      return;
+    }
+
+    await deleteAdminVideo({ video_id: id });
+    loadVideos();
+  };
+
   return (
     <Box>
       <Typography variant="h5" fontWeight="bold" gutterBottom>
@@ -39,6 +52,7 @@ function Videos() {
           <TableRow>
             <TableCell>Title</TableCell>
             <TableCell>Status</TableCell>
+            <TableCell>Visibility</TableCell>
             <TableCell>Creator</TableCell>
             <TableCell />
           </TableRow>
@@ -49,16 +63,27 @@ function Videos() {
             <TableRow key={v.id}>
               <TableCell>{v.title}</TableCell>
               <TableCell>{v.status}</TableCell>
+              <TableCell>{v.visibility}</TableCell>
               <TableCell>{v.creator_id}</TableCell>
               <TableCell>
-                <Button
-                  size="small"
-                  color="error"
-                  variant="outlined"
-                  onClick={() => disableVideo(v.id)}
-                >
-                  Disable
-                </Button>
+                <Box sx={{ display: "flex", gap: 1, flexWrap: "wrap" }}>
+                  <Button
+                    size="small"
+                    color="warning"
+                    variant="outlined"
+                    onClick={() => disableVideo(v.id)}
+                  >
+                    Disable
+                  </Button>
+                  <Button
+                    size="small"
+                    color="error"
+                    variant="outlined"
+                    onClick={() => removeVideo(v.id, v.title)}
+                  >
+                    Delete
+                  </Button>
+                </Box>
               </TableCell>
             </TableRow>
           ))}

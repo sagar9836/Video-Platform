@@ -13,9 +13,3 @@ class Creator(Base):
     channel_name: Mapped[str] = mapped_column(String, unique=True)
     description: Mapped[str] = mapped_column(String, default="")
     subscribers_count: Mapped[int] = mapped_column(Integer, default=0)
-    stream_key: Mapped[str] = mapped_column(
-        String,
-        unique=True,
-        index=True,
-        nullable=True
-    )

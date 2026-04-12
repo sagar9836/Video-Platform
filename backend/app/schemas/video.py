@@ -9,3 +9,7 @@ class VideoCreateRequest(BaseModel):
 class VideoUploadResponse(BaseModel):
     video_id: int
     upload_url: str
+
+
+class VideoVisibilityUpdateRequest(BaseModel):
+    visibility: str

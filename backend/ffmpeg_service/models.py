@@ -1,10 +1,11 @@
 import enum
-from sqlalchemy import Column, Integer, Enum
+from sqlalchemy import Column, Integer, String
 from sqlalchemy.orm import declarative_base
 
 Base = declarative_base()
 
 class VideoStatus(str, enum.Enum):
+    AWAITING_UPLOAD = "AWAITING_UPLOAD"
     UPLOADED = "UPLOADED"
     PROCESSING = "PROCESSING"
     READY = "READY"
@@ -15,4 +16,5 @@ class Video(Base):
 
     id = Column(Integer, primary_key=True)
     creator_id = Column(Integer, nullable=True)
-    status = Column(Enum(VideoStatus), nullable=False)
+    status = Column(String(16), nullable=False)
+    thumbnail_key = Column(String, nullable=True)

@@ -14,7 +14,6 @@ from app.models.creator_request import (
 from app.models.user import User, UserRole
 from app.models.video import Video
 from app.models.comment import Comment
-from app.services.stream_key import generate_stream_key
 
 router = APIRouter(prefix="/admin", tags=["Admin"])
 
@@ -29,8 +28,6 @@ async def _ensure_creator_profile(db: AsyncSession, user: User) -> None:
         select(Creator).where(Creator.user_id == user.id)
     )
     if existing_creator:
-        if not existing_creator.stream_key:
-            existing_creator.stream_key = generate_stream_key(user.id)
         return
 
     email_prefix = user.email.split("@", 1)[0]
@@ -49,7 +46,6 @@ async def _ensure_creator_profile(db: AsyncSession, user: User) -> None:
             user_id=user.id,
             channel_name=channel_name,
             description="",
-            stream_key=generate_stream_key(user.id),
         )
     )
 

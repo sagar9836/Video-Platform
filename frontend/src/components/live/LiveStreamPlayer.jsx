@@ -3,8 +3,14 @@ import Hls from "hls.js";
 
 import { Alert, Box, CircularProgress } from "@mui/material";
 
-export default function LiveStreamPlayer({ src, posterHeight = 420 }) {
+export default function LiveStreamPlayer({
+  src,
+  posterHeight = 420,
+  muted = true,
+  initialOffsetSeconds = 0,
+}) {
   const videoRef = useRef(null);
+  const appliedSourceRef = useRef("");
   const [playerError, setPlayerError] = useState("");
   const [isBuffering, setIsBuffering] = useState(true);
 
@@ -20,27 +26,66 @@ export default function LiveStreamPlayer({ src, posterHeight = 420 }) {
     const handleLoaded = () => setIsBuffering(false);
     const handleWaiting = () => setIsBuffering(true);
     const handlePlaying = () => setIsBuffering(false);
+    const startPlayback = async () => {
+      try {
+        await video.play();
+      } catch {
+        if (!video.muted) {
+          video.muted = true;
+          try {
+            await video.play();
+          } catch {
+            // Ignore autoplay failures until the user interacts.
+          }
+        }
+      }
+    };
+    const applyInitialOffset = () => {
+      if (appliedSourceRef.current === src) {
+        return;
+      }
+
+      appliedSourceRef.current = src;
+      if (!initialOffsetSeconds || Number.isNaN(initialOffsetSeconds)) {
+        return;
+      }
+
+      try {
+        if (Number.isFinite(video.duration) && video.duration > 0) {
+          video.currentTime = Math.min(initialOffsetSeconds, Math.max(video.duration - 1, 0));
+        } else {
+          video.currentTime = initialOffsetSeconds;
+        }
+      } catch {
+        // Ignore seek failures for still-loading media.
+      }
+    };
 
     video.addEventListener("loadeddata", handleLoaded);
     video.addEventListener("waiting", handleWaiting);
     video.addEventListener("playing", handlePlaying);
+    video.addEventListener("loadedmetadata", applyInitialOffset);
 
     let hls;
 
     if (video.canPlayType("application/vnd.apple.mpegurl")) {
+      video.muted = muted;
       video.src = src;
-      video.play().catch(() => {});
+      startPlayback();
     } else if (Hls.isSupported()) {
       hls = new Hls({
-        lowLatencyMode: true,
+        lowLatencyMode: false,
         backBufferLength: 90,
+        maxBufferLength: 60,
+        maxMaxBufferLength: 120,
       });
 
       hls.loadSource(src);
       hls.attachMedia(video);
 
       hls.on(Hls.Events.MANIFEST_PARSED, () => {
-        video.play().catch(() => {});
+        video.muted = muted;
+        startPlayback();
       });
 
       hls.on(Hls.Events.ERROR, (_, data) => {
@@ -62,11 +107,12 @@ export default function LiveStreamPlayer({ src, posterHeight = 420 }) {
       video.removeEventListener("loadeddata", handleLoaded);
       video.removeEventListener("waiting", handleWaiting);
       video.removeEventListener("playing", handlePlaying);
+      video.removeEventListener("loadedmetadata", applyInitialOffset);
       if (hls) {
         hls.destroy();
       }
     };
-  }, [src]);
+  }, [src, muted]);
 
   return (
     <Box>
@@ -85,7 +131,7 @@ export default function LiveStreamPlayer({ src, posterHeight = 420 }) {
           ref={videoRef}
           controls
           playsInline
-          muted
+          muted={muted}
           style={{
             width: "100%",
             height: "100%",

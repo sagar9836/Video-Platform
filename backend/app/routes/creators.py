@@ -10,15 +10,15 @@ from app.db.session import get_db
 from app.dependencies.auth import get_current_user
 from app.models.creator import Creator
 from app.models.user import User, UserRole
-from app.models.video import Video, VideoStatus
+from app.models.video import Video, VideoStatus, VideoVisibility
 from app.redis.client import redis_client
+from app.services.video_assets import build_video_play_url, build_video_thumbnail_url
 from app.schemas.creator import (
     CreatorCreate,
     CreatorVerificationConfirm,
     CreatorVerificationRequest,
 )
-from app.services.email_service import send_email
-from app.services.stream_key import generate_stream_key
+from app.services.email_service import EmailDeliveryError, send_email
 
 router = APIRouter(prefix="/creators", tags=["Creators"])
 
@@ -77,16 +77,26 @@ async def request_creator_verification(
         ex=ttl_seconds,
     )
 
-    await send_email(
-        to_email=db_user.email,
-        subject="Verify your creator channel",
-        body=(
-            f"Hello,\n\n"
-            f"Use this verification code to create your creator channel "
-            f"'{channel_name}': {code}\n\n"
-            "This code expires in 10 minutes."
-        ),
-    )
+    try:
+        await send_email(
+            to_email=db_user.email,
+            subject="Verify your creator channel",
+            body=(
+                f"Hello,\n\n"
+                f"Use this verification code to create your creator channel "
+                f"'{channel_name}': {code}\n\n"
+                "This code expires in 10 minutes."
+            ),
+            raise_on_error=True,
+        )
+    except EmailDeliveryError as exc:
+        await redis_client.delete(f"creator:verify:{user_id}:code")
+        await redis_client.delete(f"creator:verify:{user_id}:channel_name")
+        await redis_client.delete(f"creator:verify:{user_id}:description")
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Unable to send the verification email right now. Please try again.",
+        ) from exc
 
     return {
         "detail": "Verification code sent to your email",
@@ -132,13 +142,10 @@ async def confirm_creator_verification(
     if not db_user:
         raise HTTPException(404, "User not found")
 
-    stream_key = generate_stream_key(user_id)
-
     creator = Creator(
         user_id=user_id,
         channel_name=channel_name,
         description=description or "",
-        stream_key=stream_key,
     )
     db.add(creator)
     db_user.role = UserRole.CREATOR
@@ -160,9 +167,8 @@ async def confirm_creator_verification(
         body=(
             f"Hello,\n\n"
             f"Your creator channel '{creator.channel_name}' is now active.\n"
-            f"RTMP URL: {settings.live_rtmp_url}\n"
-            f"Stream key: {stream_key}\n\n"
-            "You can now open the creator studio and start streaming."
+            "You can now open the creator studio, launch the browser live room, "
+            "and start uploading videos."
         ),
     )
 
@@ -170,8 +176,6 @@ async def confirm_creator_verification(
         "detail": "Creator account activated",
         "creator_id": creator.id,
         "channel_name": creator.channel_name,
-        "rtmp_url": settings.live_rtmp_url,
-        "stream_key": stream_key,
         "access_token": access_token,
     }
 
@@ -213,13 +217,10 @@ async def create_creator_profile(
             detail="Creator profile already exists",
         )
 
-    stream_key = generate_stream_key(user_id)
-
     creator = Creator(
         user_id=user_id,
         channel_name=data.channel_name,
         description=data.description or "",
-        stream_key=stream_key,
     )
 
     db.add(creator)
@@ -253,11 +254,9 @@ async def get_my_videos(
             "title": v.title,
             "description": v.description,
             "status": v.status.value,
-            "play_url": (
-                f"https://{settings.cloudfront_domain}/videos/hls/{v.id}/master.m3u8"
-                if v.status == VideoStatus.READY and settings.cloudfront_domain
-                else None
-            ),
+            "visibility": v.visibility.value,
+            "play_url": build_video_play_url(v.id) if v.status == VideoStatus.READY else None,
+            "thumbnail_url": build_video_thumbnail_url(v),
         }
         for v in videos
     ]
@@ -278,6 +277,7 @@ async def get_creator_videos(
         .where(
             Video.creator_id == creator_id,
             Video.status == VideoStatus.READY,
+            Video.visibility == VideoVisibility.PUBLIC,
         )
         .order_by(Video.id.desc())
     )
@@ -288,11 +288,9 @@ async def get_creator_videos(
             "id": v.id,
             "title": v.title,
             "description": v.description,
-            "play_url": (
-                f"https://{settings.cloudfront_domain}/videos/hls/{v.id}/master.m3u8"
-                if settings.cloudfront_domain
-                else None
-            ),
+            "visibility": v.visibility.value,
+            "play_url": build_video_play_url(v.id),
+            "thumbnail_url": build_video_thumbnail_url(v),
         }
         for v in videos
     ]
@@ -312,6 +310,7 @@ async def get_creator_channel(
         select(Video).where(
             Video.creator_id == creator_id,
             Video.status == VideoStatus.READY,
+            Video.visibility == VideoVisibility.PUBLIC,
         )
     )
     videos_count = len(result.scalars().all())
