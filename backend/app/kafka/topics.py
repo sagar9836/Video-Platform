@@ -1,17 +1,11 @@
-VIDEO_PROCESSING_FAILED_TOPIC = "video.processing.failed"
-VIDEO_READY_TOPIC = "video.ready"
-VIDEO_UPLOADED_TOPIC = "video.uploaded"
-VIDEO_VIEWED_TOPIC = "video.viewed"
-LIVE_STARTED_TOPIC = "live.started"
-LIVE_ENDED_TOPIC = "live.ended"
+# app/kafka/topics.py
 
-VIDEO_PROCESSING_STARTED_TOPIC = "video.processing.started"
+# 🎬 Video pipeline
+VIDEO_PROCESSING_STARTED = "video.processing.started"
+VIDEO_READY = "video.ready"
+VIDEO_FAILED = "video.failed"
+VIDEO_UPLOADED = "video.uploaded"
 
-# Backward-compatible aliases used by older consumers/modules.
-VIDEO_READY = VIDEO_READY_TOPIC
-VIDEO_UPLOADED = VIDEO_UPLOADED_TOPIC
-VIDEO_PROCESSING_STARTED = VIDEO_PROCESSING_STARTED_TOPIC
-VIDEO_PROCESSING_FAILED = VIDEO_PROCESSING_FAILED_TOPIC
-VIDEO_VIEWED = VIDEO_VIEWED_TOPIC
-LIVE_STARTED = LIVE_STARTED_TOPIC
-LIVE_ENDED = LIVE_ENDED_TOPIC
+# 📡 Live streaming
+LIVE_STARTED = "live.started"
+LIVE_ENDED = "live.ended"

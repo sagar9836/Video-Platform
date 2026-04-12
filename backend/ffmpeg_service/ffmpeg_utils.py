@@ -1,27 +1,24 @@
+# ffmpeg_service/ffmpeg_utils.py
+
 import os
 import subprocess
 
-HLS_SEGMENT_SECONDS = "10"
 
-
-def run_cmd(cmd: list[str], error_msg: str):
-    print("\n🚀 Running FFmpeg Command:")
+def run_cmd(cmd, error_msg):
+    print("\n🚀 Running FFmpeg:")
     print(" ".join(cmd))
 
     result = subprocess.run(cmd, capture_output=True, text=True)
 
     if result.returncode != 0:
-        print("\n❌ FFmpeg ERROR:")
         print(result.stderr)
-        raise RuntimeError(result.stderr or error_msg)
+        raise RuntimeError(error_msg)
 
-    print("\n✅ FFmpeg SUCCESS")
+    print("✅ FFmpeg success")
 
 
-# --------------------------
-# 🎬 THUMBNAIL GENERATION
-# --------------------------
-def generate_thumbnail(input_path: str, output_path: str):
+# ---------------- THUMBNAIL ----------------
+def generate_thumbnail(input_path, output_path):
     os.makedirs(os.path.dirname(output_path), exist_ok=True)
 
     cmd = [
@@ -34,31 +31,27 @@ def generate_thumbnail(input_path: str, output_path: str):
         output_path,
     ]
 
-    run_cmd(cmd, "Thumbnail generation failed")
+    run_cmd(cmd, "Thumbnail failed")
 
 
-# --------------------------
-# 🎥 SIMPLE + STABLE HLS
-# --------------------------
-def transcode_to_hls(input_path: str, output_dir: str):
+# ---------------- HLS ----------------
+def transcode_to_hls(input_path, output_dir):
     os.makedirs(output_dir, exist_ok=True)
-
-    output_file = os.path.join(output_dir, "index.m3u8")
 
     cmd = [
         "ffmpeg",
         "-y",
         "-i", input_path,
-
-        # 🔥 FAST + SAFE (no re-encoding)
-        "-c", "copy",
-
-        "-start_number", "0",
-        "-hls_time", HLS_SEGMENT_SECONDS,
-        "-hls_list_size", "0",
+        "-preset", "veryfast",
+        "-g", "48",
+        "-sc_threshold", "0",
+        "-c:v", "libx264",
+        "-c:a", "aac",
         "-f", "hls",
-
-        output_file,
+        "-hls_time", "6",
+        "-hls_playlist_type", "vod",
+        "-hls_segment_filename", f"{output_dir}/segment_%03d.ts",
+        f"{output_dir}/master.m3u8",
     ]
 
-    run_cmd(cmd, "HLS conversion failed")
+    run_cmd(cmd, "HLS failed")

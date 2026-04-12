@@ -1,11 +1,13 @@
-# ===================== video.py =====================
+# app/routes/video.py
+
 import asyncio
 import uuid
+import logging
 
 import boto3
 from botocore.client import Config
 from botocore.exceptions import ClientError
-from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, UploadFile
+from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -14,23 +16,24 @@ from app.db.session import get_db
 from app.models.creator import Creator
 from app.models.video import Video, VideoStatus, VideoVisibility
 from app.schemas.video import VideoCreateRequest, VideoUploadResponse
-from app.dependencies.auth import get_current_user, get_current_user_optional
-from app.kafka.producer import get_kafka_producer
-from app.kafka.topics import VIDEO_PROCESSING_STARTED
+from app.dependencies.auth import get_current_user
+from app.kafka.producer import send_event
+from app.kafka.topics import VIDEO_PROCESSING_STARTED, VIDEO_UPLOADED
 from app.redis.client import redis_client
 from app.utils.s3 import generate_presigned_upload_url
 
 router = APIRouter(prefix="/videos", tags=["Videos"])
+logger = logging.getLogger("video-api")
 
 s3 = boto3.client(
     "s3",
     region_name=settings.aws_region,
-    config=Config(connect_timeout=30, read_timeout=900, retries={"max_attempts": 3}),
+    config=Config(connect_timeout=30, read_timeout=900),
 )
 
 
-# -------------------- HELPERS --------------------
-async def _get_creator_for_user(db: AsyncSession, user_id: int) -> Creator:
+# ---------------- HELPERS ----------------
+async def _get_creator(db: AsyncSession, user_id: int) -> Creator:
     creator = await db.scalar(select(Creator).where(Creator.user_id == user_id))
     if not creator:
         raise HTTPException(403, "Only creators can upload videos")
@@ -38,30 +41,31 @@ async def _get_creator_for_user(db: AsyncSession, user_id: int) -> Creator:
 
 
 async def _start_processing(video: Video):
-    # Redis update
+    # Redis
     await redis_client.set(f"video:{video.id}:status", "PROCESSING", ex=3600)
 
-    # Kafka event
-    producer = await get_kafka_producer()
-    await producer.send_and_wait(
+    # Kafka trigger
+    await send_event(
         VIDEO_PROCESSING_STARTED,
         {
             "video_id": video.id,
             "s3_key": video.s3_key,
+            "creator_id": video.creator_id,
+            "title": video.title,
         },
     )
 
 
-def _upload_fileobj(file: UploadFile, key: str):
+def _upload_file(file: UploadFile, key: str):
     s3.upload_fileobj(file.file, settings.s3_bucket, key)
 
 
-def _ensure_s3_file(key: str):
+def _check_s3(key: str):
     s3.head_object(Bucket=settings.s3_bucket, Key=key)
 
 
 # ======================================================
-# 🎥 CREATE UPLOAD SESSION (PRESIGNED URL)
+# 🎥 CREATE UPLOAD SESSION
 # ======================================================
 @router.post("/upload", response_model=VideoUploadResponse)
 async def create_upload(
@@ -69,7 +73,7 @@ async def create_upload(
     user=Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    creator = await _get_creator_for_user(db, int(user["sub"]))
+    creator = await _get_creator(db, int(user["sub"]))
 
     video_uuid = uuid.uuid4().hex
     s3_key = f"videos/raw/{creator.id}/{video_uuid}/original.mp4"
@@ -93,7 +97,7 @@ async def create_upload(
 
 
 # ======================================================
-# 📤 DIRECT UPLOAD (FALLBACK)
+# 📤 DIRECT UPLOAD
 # ======================================================
 @router.post("/upload-direct")
 async def upload_direct(
@@ -104,14 +108,12 @@ async def upload_direct(
     user=Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    creator = await _get_creator_for_user(db, int(user["sub"]))
+    creator = await _get_creator(db, int(user["sub"]))
 
     if video_id:
         video = await db.get(Video, video_id)
         if not video or video.creator_id != creator.id:
             raise HTTPException(403, "Unauthorized")
-
-        s3_key = video.s3_key
     else:
         video_uuid = uuid.uuid4().hex
         s3_key = f"videos/raw/{creator.id}/{video_uuid}/original.mp4"
@@ -130,13 +132,27 @@ async def upload_direct(
 
     try:
         await file.seek(0)
-        await asyncio.to_thread(_upload_fileobj, file, s3_key)
+        await asyncio.to_thread(_upload_file, file, video.s3_key)
     except Exception:
         video.status = VideoStatus.FAILED
         await db.commit()
         raise HTTPException(500, "Upload failed")
 
-    # 🔥 START PROCESSING IMMEDIATELY
+    # 🔥 mark uploaded
+    video.status = VideoStatus.UPLOADED
+    await db.commit()
+
+    # 🔥 notify subscribers
+    await send_event(
+        VIDEO_UPLOADED,
+        {
+            "video_id": video.id,
+            "creator_id": video.creator_id,
+            "title": video.title,
+        },
+    )
+
+    # 🔥 start processing
     video.status = VideoStatus.PROCESSING
     await db.commit()
 
@@ -146,7 +162,7 @@ async def upload_direct(
 
 
 # ======================================================
-# ✅ COMPLETE UPLOAD (MAIN FLOW)
+# ✅ COMPLETE UPLOAD (PRESIGNED FLOW)
 # ======================================================
 @router.post("/{video_id}/complete")
 async def complete_upload(
@@ -156,21 +172,19 @@ async def complete_upload(
 ):
     video = await db.get(Video, video_id)
     if not video:
-        raise HTTPException(404, "Video not found")
+        raise HTTPException(404)
 
-    creator = await _get_creator_for_user(db, int(user["sub"]))
+    creator = await _get_creator(db, int(user["sub"]))
     if creator.id != video.creator_id:
-        raise HTTPException(403, "Unauthorized")
+        raise HTTPException(403)
 
-    # 🔥 Prevent duplicate processing
     if video.status == VideoStatus.PROCESSING:
         return {"message": "Already processing"}
 
-    # 🔥 Ensure file exists in S3
     try:
-        await asyncio.to_thread(_ensure_s3_file, video.s3_key)
+        await asyncio.to_thread(_check_s3, video.s3_key)
     except Exception:
-        raise HTTPException(400, "File not found in S3")
+        raise HTTPException(400, "File not in S3")
 
     video.status = VideoStatus.PROCESSING
     await db.commit()
@@ -195,7 +209,7 @@ async def get_status(video_id: int, db: AsyncSession = Depends(get_db)):
     if not video:
         raise HTTPException(404)
 
-    return {"status": video.status.value, "error": None}
+    return {"status": video.status.value}
 
 
 # ======================================================
@@ -204,6 +218,7 @@ async def get_status(video_id: int, db: AsyncSession = Depends(get_db)):
 @router.get("/{video_id}/play")
 async def play(video_id: int, db: AsyncSession = Depends(get_db)):
     video = await db.get(Video, video_id)
+
     if not video or video.status != VideoStatus.READY:
         raise HTTPException(400, "Not ready")
 

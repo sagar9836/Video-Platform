@@ -1,4 +1,7 @@
+# app/routes/creator.py
+
 import secrets
+import logging
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy import select
@@ -12,7 +15,10 @@ from app.models.creator import Creator
 from app.models.user import User, UserRole
 from app.models.video import Video, VideoStatus, VideoVisibility
 from app.redis.client import redis_client
-from app.services.video_assets import build_video_play_url, build_video_thumbnail_url
+from app.services.video_assets import (
+    build_video_play_url,
+    build_video_thumbnail_url,
+)
 from app.schemas.creator import (
     CreatorCreate,
     CreatorVerificationConfirm,
@@ -20,10 +26,13 @@ from app.schemas.creator import (
 )
 from app.services.email_service import EmailDeliveryError, send_email
 
+logger = logging.getLogger("creator-api")
+
 router = APIRouter(prefix="/creators", tags=["Creators"])
 
 
-def _decode_redis(value: str | bytes | None) -> str | None:
+# ---------------- HELPERS ----------------
+def _decode(value):
     if isinstance(value, bytes):
         return value.decode()
     return value
@@ -33,6 +42,9 @@ def _normalize_channel_name(value: str) -> str:
     return value.strip()
 
 
+# ======================================================
+# 📧 REQUEST EMAIL VERIFICATION
+# ======================================================
 @router.post("/verify-email/request")
 async def request_creator_verification(
     data: CreatorVerificationRequest,
@@ -40,186 +52,122 @@ async def request_creator_verification(
     db: AsyncSession = Depends(get_db),
 ):
     if user["role"] != UserRole.USER:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Only normal users can become creators",
-        )
+        raise HTTPException(400, "Only users can become creators")
 
     user_id = int(user["sub"])
     channel_name = _normalize_channel_name(data.channel_name)
 
-    existing_creator = await db.execute(select(Creator).where(Creator.user_id == user_id))
-    if existing_creator.scalar_one_or_none():
-        raise HTTPException(409, "Creator profile already exists")
+    # check existing creator
+    existing = await db.scalar(select(Creator).where(Creator.user_id == user_id))
+    if existing:
+        raise HTTPException(409, "Creator already exists")
 
-    existing_channel = await db.execute(
+    # check channel uniqueness
+    existing_channel = await db.scalar(
         select(Creator).where(Creator.channel_name == channel_name)
     )
-    if existing_channel.scalar_one_or_none():
-        raise HTTPException(409, "Channel name already taken")
+    if existing_channel:
+        raise HTTPException(409, "Channel name taken")
 
     db_user = await db.get(User, user_id)
     if not db_user:
         raise HTTPException(404, "User not found")
 
     code = f"{secrets.randbelow(10**6):06d}"
-    ttl_seconds = 10 * 60
 
-    await redis_client.set(f"creator:verify:{user_id}:code", code, ex=ttl_seconds)
+    await redis_client.set(f"creator:{user_id}:code", code, ex=600)
+    await redis_client.set(f"creator:{user_id}:name", channel_name, ex=600)
     await redis_client.set(
-        f"creator:verify:{user_id}:channel_name",
-        channel_name,
-        ex=ttl_seconds,
-    )
-    await redis_client.set(
-        f"creator:verify:{user_id}:description",
-        data.description or "",
-        ex=ttl_seconds,
+        f"creator:{user_id}:desc", data.description or "", ex=600
     )
 
     try:
         await send_email(
             to_email=db_user.email,
-            subject="Verify your creator channel",
-            body=(
-                f"Hello,\n\n"
-                f"Use this verification code to create your creator channel "
-                f"'{channel_name}': {code}\n\n"
-                "This code expires in 10 minutes."
-            ),
+            subject="Verify Creator Channel",
+            body=f"Your verification code: {code}",
             raise_on_error=True,
         )
-    except EmailDeliveryError as exc:
-        await redis_client.delete(f"creator:verify:{user_id}:code")
-        await redis_client.delete(f"creator:verify:{user_id}:channel_name")
-        await redis_client.delete(f"creator:verify:{user_id}:description")
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="Unable to send the verification email right now. Please try again.",
-        ) from exc
+    except EmailDeliveryError:
+        await redis_client.delete(f"creator:{user_id}:code")
+        raise HTTPException(503, "Email failed")
 
-    return {
-        "detail": "Verification code sent to your email",
-        "channel_name": channel_name,
-    }
+    return {"message": "Verification code sent"}
 
 
-@router.post("/verify-email/confirm", status_code=status.HTTP_201_CREATED)
-async def confirm_creator_verification(
+# ======================================================
+# ✅ CONFIRM CREATOR
+# ======================================================
+@router.post("/verify-email/confirm")
+async def confirm_creator(
     data: CreatorVerificationConfirm,
     user=Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
     if user["role"] != UserRole.USER:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Only normal users can become creators",
-        )
+        raise HTTPException(400)
 
     user_id = int(user["sub"])
 
-    stored_code = _decode_redis(await redis_client.get(f"creator:verify:{user_id}:code"))
+    stored_code = _decode(await redis_client.get(f"creator:{user_id}:code"))
     if not stored_code or stored_code != data.code:
-        raise HTTPException(400, "Invalid or expired verification code")
+        raise HTTPException(400, "Invalid code")
 
-    channel_name = _decode_redis(await redis_client.get(f"creator:verify:{user_id}:channel_name"))
-    description = _decode_redis(await redis_client.get(f"creator:verify:{user_id}:description"))
+    channel_name = _decode(await redis_client.get(f"creator:{user_id}:name"))
+    description = _decode(await redis_client.get(f"creator:{user_id}:desc"))
 
     if not channel_name:
-        raise HTTPException(400, "Verification context expired")
-
-    existing_channel = await db.execute(
-        select(Creator).where(Creator.channel_name == channel_name)
-    )
-    if existing_channel.scalar_one_or_none():
-        raise HTTPException(409, "Channel name already taken")
-
-    existing_creator = await db.execute(select(Creator).where(Creator.user_id == user_id))
-    if existing_creator.scalar_one_or_none():
-        raise HTTPException(409, "Creator profile already exists")
-
-    db_user = await db.get(User, user_id)
-    if not db_user:
-        raise HTTPException(404, "User not found")
+        raise HTTPException(400, "Expired")
 
     creator = Creator(
         user_id=user_id,
         channel_name=channel_name,
         description=description or "",
     )
-    db.add(creator)
+
+    db_user = await db.get(User, user_id)
     db_user.role = UserRole.CREATOR
 
+    db.add(creator)
     await db.commit()
     await db.refresh(creator)
 
-    access_token = create_access_token(
-        {"sub": str(db_user.id), "role": db_user.role}
+    token = create_access_token(
+        {"sub": str(user_id), "role": db_user.role}
     )
 
-    await redis_client.delete(f"creator:verify:{user_id}:code")
-    await redis_client.delete(f"creator:verify:{user_id}:channel_name")
-    await redis_client.delete(f"creator:verify:{user_id}:description")
-
-    await send_email(
-        to_email=db_user.email,
-        subject="Creator account activated",
-        body=(
-            f"Hello,\n\n"
-            f"Your creator channel '{creator.channel_name}' is now active.\n"
-            "You can now open the creator studio, launch the browser live room, "
-            "and start uploading videos."
-        ),
-    )
+    await redis_client.delete(f"creator:{user_id}:code")
+    await redis_client.delete(f"creator:{user_id}:name")
+    await redis_client.delete(f"creator:{user_id}:desc")
 
     return {
-        "detail": "Creator account activated",
         "creator_id": creator.id,
         "channel_name": creator.channel_name,
-        "access_token": access_token,
+        "access_token": token,
     }
 
 
-@router.post("/apply", status_code=status.HTTP_201_CREATED)
-async def apply_for_creator(user=Depends(get_current_user)):
-    if user["role"] != UserRole.USER:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Only normal users can become creators",
-        )
-
-    return {
-        "detail": (
-            "Admin approval is no longer required. "
-            "Use /creators/verify-email/request and /creators/verify-email/confirm"
-        )
-    }
-
-
-@router.post("/", status_code=status.HTTP_201_CREATED)
+# ======================================================
+# 🧑‍💻 CREATE PROFILE (OPTIONAL)
+# ======================================================
+@router.post("/")
 async def create_creator_profile(
     data: CreatorCreate,
     user=Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
     if user["role"] != UserRole.CREATOR:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Only creators can create a profile",
-        )
+        raise HTTPException(403)
 
     user_id = int(user["sub"])
 
-    result = await db.execute(select(Creator).where(Creator.user_id == user_id))
-    if result.scalar_one_or_none():
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail="Creator profile already exists",
-        )
+    existing = await db.scalar(select(Creator).where(Creator.user_id == user_id))
+    if existing:
+        raise HTTPException(409)
 
     creator = Creator(
         user_id=user_id,
-        channel_name=data.channel_name,
+        channel_name=data.channel_name.strip(),
         description=data.description or "",
     )
 
@@ -230,81 +178,52 @@ async def create_creator_profile(
     return creator
 
 
+# ======================================================
+# 🎥 MY VIDEOS
+# ======================================================
 @router.get("/me/videos")
-async def get_my_videos(
+async def my_videos(
     user=Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
     if user["role"] != UserRole.CREATOR:
-        raise HTTPException(403, "Only creators can access their videos")
+        raise HTTPException(403)
 
-    result = await db.execute(select(Creator).where(Creator.user_id == int(user["sub"])))
-    creator = result.scalar_one_or_none()
-    if not creator:
-        raise HTTPException(404, "Creator profile not found")
+    creator = await db.scalar(
+        select(Creator).where(Creator.user_id == int(user["sub"]))
+    )
 
     result = await db.execute(
         select(Video).where(Video.creator_id == creator.id).order_by(Video.id.desc())
     )
+
     videos = result.scalars().all()
 
     return [
         {
             "id": v.id,
             "title": v.title,
-            "description": v.description,
             "status": v.status.value,
-            "visibility": v.visibility.value,
-            "play_url": build_video_play_url(v.id) if v.status == VideoStatus.READY else None,
+            "play_url": build_video_play_url(v.id)
+            if v.status == VideoStatus.READY
+            else None,
             "thumbnail_url": build_video_thumbnail_url(v),
         }
         for v in videos
     ]
 
 
+# ======================================================
+# 🌍 PUBLIC CREATOR VIDEOS
+# ======================================================
 @router.get("/{creator_id}/videos")
-async def get_creator_videos(
+async def creator_videos(
     creator_id: int,
     db: AsyncSession = Depends(get_db),
 ):
-    result = await db.execute(select(Creator).where(Creator.id == creator_id))
-    creator = result.scalar_one_or_none()
+    creator = await db.get(Creator, creator_id)
     if not creator:
-        raise HTTPException(404, "Creator not found")
-
-    result = await db.execute(
-        select(Video)
-        .where(
-            Video.creator_id == creator_id,
-            Video.status == VideoStatus.READY,
-            Video.visibility == VideoVisibility.PUBLIC,
-        )
-        .order_by(Video.id.desc())
-    )
-    videos = result.scalars().all()
-
-    return [
-        {
-            "id": v.id,
-            "title": v.title,
-            "description": v.description,
-            "visibility": v.visibility.value,
-            "play_url": build_video_play_url(v.id),
-            "thumbnail_url": build_video_thumbnail_url(v),
-        }
-        for v in videos
-    ]
-
-
-@router.get("/{creator_id}")
-async def get_creator_channel(
-    creator_id: int,
-    db: AsyncSession = Depends(get_db),
-):
-    result = await db.execute(select(Creator).where(Creator.id == creator_id))
-    creator = result.scalar_one_or_none()
-    if not creator:
-        raise HTTPException(404, "Creator not found")
+        raise HTTPException(404)
 
     result = await db.execute(
         select(Video).where(
@@ -313,6 +232,39 @@ async def get_creator_channel(
             Video.visibility == VideoVisibility.PUBLIC,
         )
     )
+
+    videos = result.scalars().all()
+
+    return [
+        {
+            "id": v.id,
+            "title": v.title,
+            "play_url": build_video_play_url(v.id),
+            "thumbnail_url": build_video_thumbnail_url(v),
+        }
+        for v in videos
+    ]
+
+
+# ======================================================
+# 📺 CREATOR CHANNEL
+# ======================================================
+@router.get("/{creator_id}")
+async def creator_channel(
+    creator_id: int,
+    db: AsyncSession = Depends(get_db),
+):
+    creator = await db.get(Creator, creator_id)
+    if not creator:
+        raise HTTPException(404)
+
+    result = await db.execute(
+        select(Video).where(
+            Video.creator_id == creator_id,
+            Video.status == VideoStatus.READY,
+        )
+    )
+
     videos_count = len(result.scalars().all())
 
     return {
