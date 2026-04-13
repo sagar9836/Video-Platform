@@ -1,4 +1,7 @@
+# ffmpeg_service/config.py
+
 from pydantic_settings import BaseSettings
+
 
 class Settings(BaseSettings):
     database_url: str
@@ -8,9 +11,9 @@ class Settings(BaseSettings):
     redis_url: str
 
     model_config = {
-        "env_file": ".env",
         "case_sensitive": False,
         "extra": "ignore",
     }
+
 
 settings = Settings()

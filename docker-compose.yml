@@ -7,7 +7,8 @@ services:
       dockerfile: Dockerfile
     container_name: video-platform-frontend
     depends_on:
-      - api
+      api:
+        condition: service_healthy
     ports:
       - "3000:80"
     restart: unless-stopped
@@ -20,22 +21,26 @@ services:
       dockerfile: Dockerfile
     container_name: video-platform-api
     env_file:
-      - ./backend/.env
+      - .env
     environment:
       DATABASE_URL: postgresql+asyncpg://postgres:postgres@postgres:5432/video_platform
       KAFKA_BOOTSTRAP_SERVERS: kafka:29092
       REDIS_URL: redis://redis:6379/0
-      REDIS_HOST: redis
-      REDIS_PORT: 6379
     depends_on:
       postgres:
         condition: service_healthy
       kafka:
-        condition: service_started
+        condition: service_healthy
       redis:
         condition: service_started
     ports:
       - "8000:8000"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
     restart: unless-stopped
     networks:
       - video_platform_net
@@ -46,16 +51,20 @@ services:
       dockerfile: Dockerfile
     container_name: video-platform-ffmpeg
     env_file:
-      - ./backend/.env   # 🔥 SINGLE SOURCE OF TRUTH
+      - .env
     environment:
       DATABASE_URL: postgresql+asyncpg://postgres:postgres@postgres:5432/video_platform
       KAFKA_BOOTSTRAP_SERVERS: kafka:29092
       REDIS_URL: redis://redis:6379/0
+      AWS_REGION: ${AWS_REGION}
+      S3_BUCKET: ${S3_BUCKET}
+      AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID}
+      AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY}
     depends_on:
       postgres:
         condition: service_healthy
       kafka:
-        condition: service_started
+        condition: service_healthy
       redis:
         condition: service_started
     restart: unless-stopped
@@ -96,6 +105,11 @@ services:
     container_name: video-platform-zookeeper
     environment:
       ZOOKEEPER_CLIENT_PORT: 2181
+    healthcheck:
+      test: ["CMD", "bash", "-c", "echo ruok | nc localhost 2181"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
     restart: unless-stopped
     networks:
       - video_platform_net
@@ -104,23 +118,38 @@ services:
     image: confluentinc/cp-kafka:7.5.0
     container_name: video-platform-kafka
     depends_on:
-      - zookeeper
+      zookeeper:
+        condition: service_healthy
     environment:
       KAFKA_BROKER_ID: 1
       KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
+
       KAFKA_LISTENERS: INTERNAL://0.0.0.0:29092
       KAFKA_ADVERTISED_LISTENERS: INTERNAL://kafka:29092
+
       KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: INTERNAL:PLAINTEXT
       KAFKA_INTER_BROKER_LISTENER_NAME: INTERNAL
+
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+
       KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
+
     ports:
       - "29092:29092"
+
     healthcheck:
-      test: ["CMD-SHELL", "kafka-topics --bootstrap-server localhost:29092 --list >/dev/null 2>&1"]
+      test:
+        [
+          "CMD-SHELL",
+          "cub kafka-ready -b localhost:29092 1 30"
+        ]
       interval: 10s
-      timeout: 5s
-      retries: 5
-      start_period: 10s
+      timeout: 10s
+      retries: 10
+      start_period: 20s
+
     restart: unless-stopped
     networks:
       - video_platform_net
