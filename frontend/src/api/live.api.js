@@ -2,20 +2,26 @@ import api from "./axios";
 
 const LOCALHOST_HOSTS = new Set(["localhost", "127.0.0.1", "::1", "[::1]"]);
 
+// ------------------------------
+// 🔁 Fix LiveKit URL for browser
+// ------------------------------
 const resolveBrowserLivekitUrl = (rawUrl) => {
-  if (!rawUrl || typeof window === "undefined") {
-    return rawUrl;
-  }
+  if (!rawUrl || typeof window === "undefined") return rawUrl;
 
   try {
     const parsed = new URL(rawUrl);
     const browserHost = window.location.hostname;
 
-    if (!LOCALHOST_HOSTS.has(parsed.hostname) || !browserHost || LOCALHOST_HOSTS.has(browserHost)) {
+    if (
+      !LOCALHOST_HOSTS.has(parsed.hostname) ||
+      !browserHost ||
+      LOCALHOST_HOSTS.has(browserHost)
+    ) {
       return rawUrl;
     }
 
     parsed.hostname = browserHost;
+
     if (window.location.protocol === "https:" && parsed.protocol === "ws:") {
       parsed.protocol = "wss:";
     }
@@ -27,9 +33,7 @@ const resolveBrowserLivekitUrl = (rawUrl) => {
 };
 
 const normalizeLivekitPayload = (payload) => {
-  if (!payload || typeof payload !== "object") {
-    return payload;
-  }
+  if (!payload || typeof payload !== "object") return payload;
 
   const resolvedUrl = resolveBrowserLivekitUrl(
     payload.url || payload.livekit_url || payload.livekit?.url
@@ -39,20 +43,29 @@ const normalizeLivekitPayload = (payload) => {
     ...payload,
     ...(payload.url ? { url: resolvedUrl } : {}),
     ...(payload.livekit_url ? { livekit_url: resolvedUrl } : {}),
-    ...(payload.livekit ? { livekit: { ...payload.livekit, url: resolvedUrl } } : {}),
+    ...(payload.livekit
+      ? { livekit: { ...payload.livekit, url: resolvedUrl } }
+      : {}),
   };
 };
 
+// ==============================
+// 📡 LIVE STATUS
+// ==============================
 export const fetchLiveStatus = async (creatorId) => {
   const res = await api.get(`/live/${creatorId}/status`);
   return res.data;
 };
 
+// 🔥 IMPORTANT: this is your main entry now
 export const fetchLiveRoom = async (creatorId) => {
-  const res = await api.get(`/live/${creatorId}/room`);
-  return normalizeLivekitPayload(res.data);
+  const res = await api.get(`/live/${creatorId}/status`);
+  return res.data;
 };
 
+// ==============================
+// 🎥 LIVE SESSION (CREATOR)
+// ==============================
 export const fetchMyLiveSession = async () => {
   const res = await api.get("/live/session/me");
   return normalizeLivekitPayload(res.data);
@@ -73,6 +86,9 @@ export const endLiveSession = async () => {
   return res.data;
 };
 
+// ==============================
+// 🎬 PREMIERE
+// ==============================
 export const fetchMyPremiereSession = async () => {
   const res = await api.get("/live/premiere/me");
   return res.data;
@@ -93,12 +109,24 @@ export const endPremiereSession = async (premiereId) => {
   return res.data;
 };
 
-export const issuePublisherToken = async () => {
-  const res = await api.post("/live/token/publisher");
+// ==============================
+// 🔐 LIVEKIT TOKENS (FIXED)
+// ==============================
+
+// 🔥 FIXED: now requires room_name
+export const issuePublisherToken = async (roomName) => {
+  const res = await api.post("/live/token/publisher", {
+    room_name: roomName,
+  });
+
   return normalizeLivekitPayload(res.data);
 };
 
-export const issueViewerToken = async (creatorId) => {
-  const res = await api.post("/live/token/viewer", { creator_id: creatorId });
+// 🔥 FIXED: now requires room_name
+export const issueViewerToken = async (roomName) => {
+  const res = await api.post("/live/token/viewer", {
+    room_name: roomName,
+  });
+
   return normalizeLivekitPayload(res.data);
 };

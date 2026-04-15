@@ -89,7 +89,7 @@ class Settings(BaseModel):
     livekit_url: str = "ws://localhost:7880"
     livekit_public_url: str | None = None
     livekit_api_key: str = "devkey"
-    livekit_api_secret: str = "862176abb6dc458c91563e072725c6ff"
+    livekit_api_secret: str = "secret"
 
     @classmethod
     def from_env(cls) -> "Settings":
