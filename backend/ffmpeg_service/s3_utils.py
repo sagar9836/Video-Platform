@@ -60,7 +60,7 @@ def upload_thumbnail_to_s3(video_id: int, thumbnail_path: str) -> str:
         s3_key,
         ExtraArgs={
             "ContentType": "image/jpeg",
-            "CacheControl": "public, max-age=31536000, immutable",
+            "CacheControl": "no-cache",
         },
     )
 

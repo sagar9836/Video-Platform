@@ -45,17 +45,20 @@ export default function VideoCard({ video }) {
     >
       <Box sx={{ position: "relative" }}>
         <CardMedia
+          key={video.id} // 🔥 FORCE RE-RENDER
           component="img"
           image={
-            video.thumbnail_url ||
-            video.thumbnailUrl ||
-            `https://images.unsplash.com/photo-1492619375914-88005aa9e8fb?auto=format&fit=crop&w=1200&q=80`
+          video.thumbnail_url
+            ? `${video.thumbnail_url}?t=${video.id}` // 🔥 CACHE BUST
+            : video.thumbnailUrl
+            ? `${video.thumbnailUrl}?t=${video.id}`
+            : `https://images.unsplash.com/photo-1492619375914-88005aa9e8fb?auto=format&fit=crop&w=1200&q=80`
           }
           alt={video.title}
           loading="lazy"
           sx={{
-            aspectRatio: "16 / 9",
-            objectFit: "cover",
+          aspectRatio: "16 / 9",
+          objectFit: "cover",
           }}
         />
         <Box

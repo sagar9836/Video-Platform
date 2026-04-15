@@ -31,8 +31,10 @@ s3 = boto3.client(
     config=Config(connect_timeout=30, read_timeout=900),
 )
 
+# ======================================================
+# HELPERS
+# ======================================================
 
-# ---------------- HELPERS ----------------
 async def _get_creator(db: AsyncSession, user_id: int) -> Creator:
     creator = await db.scalar(select(Creator).where(Creator.user_id == user_id))
     if not creator:
@@ -41,10 +43,13 @@ async def _get_creator(db: AsyncSession, user_id: int) -> Creator:
 
 
 async def _start_processing(video: Video):
-    # Redis
+    # 🔥 prevent duplicate triggers
+    existing = await redis_client.get(f"video:{video.id}:status")
+    if existing == "PROCESSING":
+        return
+
     await redis_client.set(f"video:{video.id}:status", "PROCESSING", ex=3600)
 
-    # Kafka trigger
     await send_event(
         VIDEO_PROCESSING_STARTED,
         {
@@ -65,8 +70,9 @@ def _check_s3(key: str):
 
 
 # ======================================================
-# 🎥 CREATE UPLOAD SESSION
+# 🎥 CREATE UPLOAD SESSION (PRESIGNED)
 # ======================================================
+
 @router.post("/upload", response_model=VideoUploadResponse)
 async def create_upload(
     data: VideoCreateRequest,
@@ -93,12 +99,16 @@ async def create_upload(
 
     upload_url = generate_presigned_upload_url(settings.s3_bucket, s3_key)
 
-    return {"video_id": video.id, "upload_url": upload_url}
+    return {
+        "video_id": video.id,
+        "upload_url": upload_url,
+    }
 
 
 # ======================================================
 # 📤 DIRECT UPLOAD
 # ======================================================
+
 @router.post("/upload-direct")
 async def upload_direct(
     title: str = Form(...),
@@ -126,6 +136,7 @@ async def upload_direct(
             status=VideoStatus.UPLOADED,
             visibility=VideoVisibility.PUBLIC,
         )
+
         db.add(video)
         await db.commit()
         await db.refresh(video)
@@ -138,11 +149,11 @@ async def upload_direct(
         await db.commit()
         raise HTTPException(500, "Upload failed")
 
-    # 🔥 mark uploaded
+    # mark uploaded
     video.status = VideoStatus.UPLOADED
     await db.commit()
 
-    # 🔥 notify subscribers
+    # notify subscribers
     await send_event(
         VIDEO_UPLOADED,
         {
@@ -152,18 +163,22 @@ async def upload_direct(
         },
     )
 
-    # 🔥 start processing
+    # start processing
     video.status = VideoStatus.PROCESSING
     await db.commit()
 
     await _start_processing(video)
 
-    return {"video_id": video.id, "status": "PROCESSING"}
+    return {
+        "video_id": video.id,
+        "status": "PROCESSING",
+    }
 
 
 # ======================================================
 # ✅ COMPLETE UPLOAD (PRESIGNED FLOW)
 # ======================================================
+
 @router.post("/{video_id}/complete")
 async def complete_upload(
     video_id: int,
@@ -172,11 +187,11 @@ async def complete_upload(
 ):
     video = await db.get(Video, video_id)
     if not video:
-        raise HTTPException(404)
+        raise HTTPException(404, "Video not found")
 
     creator = await _get_creator(db, int(user["sub"]))
     if creator.id != video.creator_id:
-        raise HTTPException(403)
+        raise HTTPException(403, "Unauthorized")
 
     if video.status == VideoStatus.PROCESSING:
         return {"message": "Already processing"}
@@ -184,7 +199,7 @@ async def complete_upload(
     try:
         await asyncio.to_thread(_check_s3, video.s3_key)
     except Exception:
-        raise HTTPException(400, "File not in S3")
+        raise HTTPException(400, "File not uploaded to S3")
 
     video.status = VideoStatus.PROCESSING
     await db.commit()
@@ -197,6 +212,7 @@ async def complete_upload(
 # ======================================================
 # 📡 STATUS
 # ======================================================
+
 @router.get("/{video_id}/status")
 async def get_status(video_id: int, db: AsyncSession = Depends(get_db)):
     status = await redis_client.get(f"video:{video_id}:status")
@@ -207,20 +223,24 @@ async def get_status(video_id: int, db: AsyncSession = Depends(get_db)):
 
     video = await db.get(Video, video_id)
     if not video:
-        raise HTTPException(404)
+        raise HTTPException(404, "Video not found")
 
     return {"status": video.status.value}
 
 
 # ======================================================
-# ▶️ PLAY
+# ▶️ PLAY (FIXED)
 # ======================================================
+
 @router.get("/{video_id}/play")
 async def play(video_id: int, db: AsyncSession = Depends(get_db)):
     video = await db.get(Video, video_id)
 
-    if not video or video.status != VideoStatus.READY:
-        raise HTTPException(400, "Not ready")
+    if not video:
+        raise HTTPException(404, "Video not found")
+
+    if video.status != VideoStatus.READY:
+        raise HTTPException(400, "Video not ready")
 
     path = f"videos/hls/{video.id}/master.m3u8"
 
@@ -229,6 +249,15 @@ async def play(video_id: int, db: AsyncSession = Depends(get_db)):
     except ClientError:
         raise HTTPException(503, "Still processing")
 
+    # 🔥 CACHE BUSTING
+    hls_url = f"https://{settings.cloudfront_domain}/{path}?v={video.id}"
+
+    thumbnail_url = (
+        f"https://{settings.cloudfront_domain}/videos/thumbnails/{video.id}/thumbnail.jpg?v={video.id}"
+    )
+
     return {
-        "hls_url": f"https://{settings.cloudfront_domain}/{path}"
+        "video_id": video.id,
+        "hls_url": hls_url,
+        "thumbnail_url": thumbnail_url,
     }

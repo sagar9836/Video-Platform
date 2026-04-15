@@ -35,7 +35,7 @@ def generate_thumbnail(input_path, output_path):
 
 
 # ---------------- HLS ----------------
-def transcode_to_hls(input_path, output_dir):
+def transcode_to_hls(input_path, output_dir, video_id):
     os.makedirs(output_dir, exist_ok=True)
 
     cmd = [
@@ -50,7 +50,7 @@ def transcode_to_hls(input_path, output_dir):
         "-f", "hls",
         "-hls_time", "6",
         "-hls_playlist_type", "vod",
-        "-hls_segment_filename", f"{output_dir}/segment_%03d.ts",
+        "-hls_segment_filename", f"{output_dir}/{video_id}_segment_%03d.ts",
         f"{output_dir}/master.m3u8",
     ]
 

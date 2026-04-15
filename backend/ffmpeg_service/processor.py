@@ -31,7 +31,7 @@ async def process_video_pipeline(video_id, s3_key):
         )
 
         # TRANSCODE
-        await asyncio.to_thread(transcode_to_hls, input_path, hls_dir)
+        await asyncio.to_thread(transcode_to_hls, input_path, hls_dir, video_id)
 
         # UPLOAD
         await asyncio.to_thread(upload_hls_to_s3, video_id, hls_dir)
