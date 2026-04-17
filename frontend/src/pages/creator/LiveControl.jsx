@@ -20,13 +20,14 @@ import {
 } from "@mui/material";
 
 import {
-  createLiveSession,
   endLiveSession,
   fetchMyLiveSession,
   issuePublisherToken,
+  startLiveRecording,
   startLiveSession,
 } from "../../api/live.api";
 import { useAuth } from "../../auth/AuthContext";
+import LiveChatPanel from "../../components/live/LiveChatPanel";
 
 const LIVEKIT_CONNECT_OPTIONS = {
   maxRetries: 3,
@@ -272,38 +273,46 @@ export default function LiveControl() {
     return tokenData;
   };
 
-  const goLive = async () => {
-    setPublishing(true);
-    setError("");
-    setNotice("");
-    stopRequestedRef.current = false;
-    clearReconnectTimer();
+const goLive = async () => {
+  setPublishing(true);
+  setError("");
+  setNotice("");
+  stopRequestedRef.current = false;
+
+  try {
+    const payload = {
+      title: title.trim(),
+      description,
+      recording_enabled: true,
+    };
+
+    const sessionData = await startLiveSession(payload);
+    if (sessionData?.session) {
+      setSession(sessionData.session);
+    }
+
+    const tracks = await ensureLocalPreview();
+    await connectPublisherRoom(tracks, payload);
 
     try {
-      const payload = {
-        title: title.trim() || `${user?.creator?.channel_name || "Creator"} live`,
-        description,
-        recording_enabled: false,
-      };
-
-      const sessionData = await createLiveSession(payload);
-      const tracks = await ensureLocalPreview();
-      const tokenData = await connectPublisherRoom(tracks, payload);
-
-      const started = await startLiveSession(payload);
-      setSession(started.session || tokenData.session || sessionData.session);
-      setNotice("You are live. Open the public room to verify playback.");
-    } catch (err) {
-      disconnectRoom();
+      const recordingData = await startLiveRecording();
+      setSession(recordingData.session || sessionData.session);
+      setNotice("You are live and recording.");
+    } catch (recordingErr) {
+      setSession(sessionData.session ? { ...sessionData.session, status: "LIVE" } : null);
+      setNotice("You are live, but recording could not be started.");
       setError(
-        err?.response?.data?.detail ||
-          err?.message ||
-          "Unable to start the live stream."
+        recordingErr?.response?.data?.detail ||
+          recordingErr?.message ||
+          "Recording could not be started."
       );
-    } finally {
-      setPublishing(false);
     }
-  };
+  } catch (err) {
+    setError(err?.response?.data?.detail || err?.message || "Failed to start live");
+  } finally {
+    setPublishing(false);
+  }
+};
 
   const stopLive = async () => {
     setEnding(true);
@@ -342,7 +351,8 @@ export default function LiveControl() {
 
   return (
     <Box sx={{ maxWidth: 1280, mx: "auto", mt: 4, px: { xs: 2, md: 3 }, pb: 6 }}>
-      <Stack direction={{ xs: "column", xl: "row" }} spacing={3}>
+      <Stack spacing={3}>
+        <Stack direction={{ xs: "column", xl: "row" }} spacing={3}>
         <Card
           sx={{
             flex: 1.2,
@@ -600,6 +610,17 @@ export default function LiveControl() {
             </Stack>
           </CardContent>
         </Card>
+        </Stack>
+
+        {user?.creator?.id && (
+          <LiveChatPanel
+            roomName={`creator:${user.creator.id}`}
+            dark
+            enabled
+            title="Audience chat"
+            subtitle="Messages are fanned out through Kafka, so this panel mirrors what viewers see on the public live page."
+          />
+        )}
       </Stack>
     </Box>
   );

@@ -87,7 +87,7 @@ class Settings(BaseModel):
     email_from: str = "no-reply@videoplatform.local"
 
     livekit_url: str = "ws://localhost:7880"
-    livekit_public_url: str | None = None
+    livekit_public_url: str = "ws://localhost:7880"
     livekit_api_key: str = "devkey"
     livekit_api_secret: str = "secret"
 

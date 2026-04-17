@@ -46,6 +46,30 @@ async def create_tables():
         await conn.execute(
             text("UPDATE users SET is_active = TRUE WHERE is_active IS NULL")
         )
+        await conn.execute(
+            text(
+                "ALTER TABLE live_sessions "
+                "ADD COLUMN IF NOT EXISTS description VARCHAR(2000) "
+                "NOT NULL DEFAULT ''"
+            )
+        )
+        await conn.execute(
+            text(
+                "ALTER TABLE live_sessions "
+                "ADD COLUMN IF NOT EXISTS recording_enabled BOOLEAN "
+                "NOT NULL DEFAULT FALSE"
+            )
+        )
+        await conn.execute(
+            text("UPDATE live_sessions SET description = '' WHERE description IS NULL")
+        )
+        await conn.execute(
+            text(
+                "UPDATE live_sessions "
+                "SET recording_enabled = FALSE "
+                "WHERE recording_enabled IS NULL"
+            )
+        )
 
 
 async def create_bootstrap_admin():

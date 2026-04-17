@@ -339,7 +339,7 @@ class Query:
     async def creator_studio(self, info: Info) -> Optional[CreatorStudioData]:
         request: Request = info.context["request"]
         viewer = _optional_user_from_request(request)
-        if not viewer or viewer.get("role") != UserRole.CREATOR:
+        if not viewer or viewer.get("role") != UserRole.CREATOR.value:
             return None
 
         user_id = int(viewer["sub"])
@@ -385,7 +385,7 @@ class Query:
     async def admin_dashboard(self, info: Info) -> AdminDashboardData:
         request: Request = info.context["request"]
         viewer = _optional_user_from_request(request)
-        if not viewer or viewer.get("role") != UserRole.ADMIN:
+        if not viewer or viewer.get("role") != UserRole.ADMIN.value:
             raise HTTPException(403, "Admin access required")
 
         async with AsyncSessionLocal() as db:

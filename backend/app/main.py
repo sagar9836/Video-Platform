@@ -1,4 +1,5 @@
 import asyncio
+import logging
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -9,6 +10,7 @@ from app.db.init_db import init_db
 from app.graphql.schema import schema
 from app.kafka.notification_consumer import start_notification_consumer
 from app.kafka.producer import close_kafka_producer
+from app.services.live_chat import start_live_chat_consumer
 from app.routes import (
     admin,
     admin_comments,
@@ -23,7 +25,10 @@ from app.routes import (
     subscriptions,
     users,
     videos,
+    live_chat,
 )
+
+logger = logging.getLogger("app")
 
 app = FastAPI(
     title=settings.app_name,
@@ -31,6 +36,7 @@ app = FastAPI(
 )
 
 notification_consumer_task: asyncio.Task | None = None
+live_chat_consumer_task: asyncio.Task | None = None
 
 graphql_app = GraphQLRouter(schema)
 
@@ -45,26 +51,47 @@ app.add_middleware(
 
 @app.on_event("startup")
 async def startup_event():
-    global notification_consumer_task
+    global notification_consumer_task, live_chat_consumer_task
+
+    logger.info("🚀 Starting application...")
 
     await init_db()
-    notification_consumer_task = asyncio.create_task(start_notification_consumer())
+
+    # 🔥 Start Kafka consumers safely
+    try:
+        notification_consumer_task = asyncio.create_task(
+            start_notification_consumer()
+        )
+        live_chat_consumer_task = asyncio.create_task(
+            start_live_chat_consumer()
+        )
+
+        logger.info("✅ Background consumers started")
+
+    except Exception as e:
+        logger.exception("❌ Failed to start background consumers")
 
 
 @app.on_event("shutdown")
 async def shutdown_event():
-    global notification_consumer_task
+    global notification_consumer_task, live_chat_consumer_task
 
-    if notification_consumer_task is not None:
-        notification_consumer_task.cancel()
-        try:
-            await notification_consumer_task
-        except asyncio.CancelledError:
-            pass
-        notification_consumer_task = None
+    logger.info("🛑 Shutting down application...")
+
+    for task in [notification_consumer_task, live_chat_consumer_task]:
+        if task:
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
 
     await close_kafka_producer()
 
+    logger.info("✅ Shutdown complete")
+
+
+# ---------------- ROUTES ----------------
 
 app.include_router(auth.router)
 app.include_router(users.router)
@@ -80,7 +107,10 @@ app.include_router(admin_users.router)
 app.include_router(admin_reports.router)
 app.include_router(admin_videos.router)
 app.include_router(graphql_app, prefix="/graphql")
+app.include_router(live_chat.router)
 
+
+# ---------------- HEALTH ----------------
 
 @app.get("/health", tags=["Health"])
 async def health_check():

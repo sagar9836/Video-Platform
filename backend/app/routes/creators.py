@@ -51,7 +51,7 @@ async def request_creator_verification(
     user=Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    if user["role"] != UserRole.USER:
+    if user["role"] != UserRole.USER.value:
         raise HTTPException(400, "Only users can become creators")
 
     user_id = int(user["sub"])
@@ -104,7 +104,7 @@ async def confirm_creator(
     user=Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    if user["role"] != UserRole.USER:
+    if user["role"] != UserRole.USER.value:
         raise HTTPException(400)
 
     user_id = int(user["sub"])
@@ -119,6 +119,16 @@ async def confirm_creator(
     if not channel_name:
         raise HTTPException(400, "Expired")
 
+    existing_creator = await db.scalar(select(Creator).where(Creator.user_id == user_id))
+    if existing_creator:
+        raise HTTPException(409, "Creator already exists")
+
+    existing_channel = await db.scalar(
+        select(Creator).where(Creator.channel_name == channel_name)
+    )
+    if existing_channel:
+        raise HTTPException(409, "Channel name taken")
+
     creator = Creator(
         user_id=user_id,
         channel_name=channel_name,
@@ -126,6 +136,8 @@ async def confirm_creator(
     )
 
     db_user = await db.get(User, user_id)
+    if not db_user:
+        raise HTTPException(404, "User not found")
     db_user.role = UserRole.CREATOR
 
     db.add(creator)
@@ -156,7 +168,7 @@ async def create_creator_profile(
     user=Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    if user["role"] != UserRole.CREATOR:
+    if user["role"] != UserRole.CREATOR.value:
         raise HTTPException(403)
 
     user_id = int(user["sub"])
@@ -165,9 +177,19 @@ async def create_creator_profile(
     if existing:
         raise HTTPException(409)
 
+    channel_name = data.channel_name.strip()
+    if not channel_name:
+        raise HTTPException(400, "Channel name is required")
+
+    existing_channel = await db.scalar(
+        select(Creator).where(Creator.channel_name == channel_name)
+    )
+    if existing_channel:
+        raise HTTPException(409, "Channel name taken")
+
     creator = Creator(
         user_id=user_id,
-        channel_name=data.channel_name.strip(),
+        channel_name=channel_name,
         description=data.description or "",
     )
 
@@ -186,7 +208,7 @@ async def my_videos(
     user=Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    if user["role"] != UserRole.CREATOR:
+    if user["role"] != UserRole.CREATOR.value:
         raise HTTPException(403)
 
     creator = await db.scalar(
@@ -262,6 +284,7 @@ async def creator_channel(
         select(Video).where(
             Video.creator_id == creator_id,
             Video.status == VideoStatus.READY,
+            Video.visibility == VideoVisibility.PUBLIC,
         )
     )
 

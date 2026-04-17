@@ -9,3 +9,4 @@ VIDEO_UPLOADED = "video.uploaded"
 # 📡 Live streaming
 LIVE_STARTED = "live.started"
 LIVE_ENDED = "live.ended"
+LIVE_CHAT_MESSAGE = "live.chat.message"

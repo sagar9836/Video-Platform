@@ -1,10 +1,7 @@
-version: "3.9"
-
 services:
   frontend:
     build:
       context: ./frontend
-      dockerfile: Dockerfile
     container_name: video-platform-frontend
     depends_on:
       api:
@@ -18,7 +15,6 @@ services:
   api:
     build:
       context: ./backend
-      dockerfile: Dockerfile
     container_name: video-platform-api
     env_file:
       - .env
@@ -26,12 +22,16 @@ services:
       DATABASE_URL: postgresql+asyncpg://postgres:postgres@postgres:5432/video_platform
       KAFKA_BOOTSTRAP_SERVERS: kafka:29092
       REDIS_URL: redis://redis:6379/0
+      LIVEKIT_URL: ws://livekit:7880
+      LIVEKIT_PUBLIC_URL: ws://localhost:7880
     depends_on:
       postgres:
         condition: service_healthy
       kafka:
         condition: service_healthy
       redis:
+        condition: service_started
+      livekit:
         condition: service_started
     ports:
       - "8000:8000"
@@ -40,7 +40,7 @@ services:
       interval: 15s
       timeout: 5s
       retries: 5
-      start_period: 20s
+      start_period: 40s
     restart: unless-stopped
     networks:
       - video_platform_net
@@ -48,7 +48,6 @@ services:
   ffmpeg:
     build:
       context: ./backend/ffmpeg_service
-      dockerfile: Dockerfile
     container_name: video-platform-ffmpeg
     env_file:
       - .env
@@ -56,21 +55,16 @@ services:
       DATABASE_URL: postgresql+asyncpg://postgres:postgres@postgres:5432/video_platform
       KAFKA_BOOTSTRAP_SERVERS: kafka:29092
       REDIS_URL: redis://redis:6379/0
-      AWS_REGION: ${AWS_REGION}
-      S3_BUCKET: ${S3_BUCKET}
-      AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID}
-      AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY}
+    volumes:
+      - recordings:/tmp   # 🔥 shared with egress
     depends_on:
-      postgres:
-        condition: service_healthy
       kafka:
         condition: service_healthy
-      redis:
-        condition: service_started
     restart: unless-stopped
     networks:
       - video_platform_net
 
+  # ---------------- DATABASE ----------------
   postgres:
     image: postgres:15
     container_name: video-platform-postgres
@@ -78,8 +72,6 @@ services:
       POSTGRES_DB: video_platform
       POSTGRES_USER: postgres
       POSTGRES_PASSWORD: postgres
-    ports:
-      - "5432:5432"
     volumes:
       - pg_data:/var/lib/postgresql/data
     healthcheck:
@@ -91,15 +83,15 @@ services:
     networks:
       - video_platform_net
 
+  # ---------------- REDIS ----------------
   redis:
     image: redis:7
     container_name: video-platform-redis
-    ports:
-      - "6379:6379"
     restart: unless-stopped
     networks:
       - video_platform_net
 
+  # ---------------- ZOOKEEPER ----------------
   zookeeper:
     image: confluentinc/cp-zookeeper:7.5.0
     container_name: video-platform-zookeeper
@@ -114,6 +106,7 @@ services:
     networks:
       - video_platform_net
 
+  # ---------------- KAFKA ----------------
   kafka:
     image: confluentinc/cp-kafka:7.5.0
     container_name: video-platform-kafka
@@ -124,11 +117,11 @@ services:
       KAFKA_BROKER_ID: 1
       KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
 
-      KAFKA_LISTENERS: INTERNAL://0.0.0.0:29092
-      KAFKA_ADVERTISED_LISTENERS: INTERNAL://kafka:29092
-
-      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: INTERNAL:PLAINTEXT
-      KAFKA_INTER_BROKER_LISTENER_NAME: INTERNAL
+      # ✅ stable listener config
+      KAFKA_LISTENERS: PLAINTEXT://0.0.0.0:29092
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:29092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
 
       KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
       KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
@@ -136,15 +129,8 @@ services:
 
       KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
 
-    ports:
-      - "29092:29092"
-
     healthcheck:
-      test:
-        [
-          "CMD-SHELL",
-          "cub kafka-ready -b localhost:29092 1 30"
-        ]
+      test: ["CMD-SHELL", "cub kafka-ready -b localhost:29092 1 30"]
       interval: 10s
       timeout: 10s
       retries: 10
@@ -154,9 +140,49 @@ services:
     networks:
       - video_platform_net
 
+  # ---------------- LIVEKIT ----------------
+  livekit:
+    image: livekit/livekit-server
+    container_name: video-platform-livekit
+    command: --config /etc/livekit.yaml
+    volumes:
+      - ./infra/livekit/livekit.yaml:/etc/livekit.yaml
+    depends_on:
+      - redis
+    ports:
+      - "7880:7880"
+      - "7881:7881"
+      - "50000-50100:50000-50100/udp"
+    restart: unless-stopped
+    networks:
+      - video_platform_net
+
+  # ---------------- EGRESS (RECORDING) ----------------
+  livekit-egress:
+    image: livekit/egress
+    container_name: video-platform-egress
+    command: --config /etc/egress.yaml
+    environment:
+      LIVEKIT_API_KEY: devkey
+      LIVEKIT_API_SECRET: 1f221b798295dde71aa319ed2ca5b8615712d96e89fe5dc38c82f0333a6fe135
+      LIVEKIT_WS_URL: ws://livekit:7880
+      EGRESS_CONFIG_FILE: /etc/egress.yaml
+    volumes:
+      - ./infra/livekit/egress.yaml:/etc/egress.yaml
+      - recordings:/tmp   # 🔥 shared with ffmpeg
+    depends_on:
+      - livekit
+      - redis
+    restart: unless-stopped
+    networks:
+      - video_platform_net
+
+# ---------------- NETWORK ----------------
 networks:
   video_platform_net:
     driver: bridge
 
+# ---------------- VOLUMES ----------------
 volumes:
   pg_data:
+  recordings:

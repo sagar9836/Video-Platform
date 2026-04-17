@@ -1,23 +1,33 @@
-import time
-from livekit import AccessToken, VideoGrant
+from datetime import timedelta
+from livekit.api import AccessToken, VideoGrants
+
 from app.core.config import settings
 
 
-def create_token(identity: str, room: str, is_publisher: bool):
-    token = AccessToken(
-        settings.livekit_api_key,
-        settings.livekit_api_secret,
-        identity=identity,
+def create_token(identity: str, room: str, is_publisher: bool) -> str:
+    token = (
+        AccessToken(settings.livekit_api_key, settings.livekit_api_secret)
+        .with_identity(identity)
+        .with_grants(
+            VideoGrants(
+                room_join=True,
+                room=room,
+                can_publish=is_publisher,
+                can_subscribe=True,
+            )
+        )
+        .with_ttl(timedelta(hours=1))
     )
 
-    grant = VideoGrant(
-        room_join=True,
-        room=room,
-        can_publish=is_publisher,
-        can_subscribe=True,
-    )
+    return token.to_jwt()
 
-    token.add_grant(grant)
-    token.ttl = 3600  # 1 hour
+
+def create_egress_token() -> str:
+    token = (
+        AccessToken(settings.livekit_api_key, settings.livekit_api_secret)
+        .with_identity("egress-controller")
+        .with_grants(VideoGrants(room_record=True))
+        .with_ttl(timedelta(minutes=10))
+    )
 
     return token.to_jwt()

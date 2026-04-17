@@ -37,12 +37,13 @@ async def get_kafka_producer() -> AIOKafkaProducer:
 
 
 # ---------------- SAFE SEND (WITH RETRY) ----------------
-async def send_event(topic: str, payload: dict):
+async def send_event(topic: str, payload: dict, key: str | None = None):
     producer = await get_kafka_producer()
+    encoded_key = key.encode("utf-8") if key else None
 
     for attempt in range(3):  # manual retry
         try:
-            await producer.send_and_wait(topic, payload)
+            await producer.send_and_wait(topic, payload, key=encoded_key)
             logger.info(f"📤 Event sent | topic={topic} payload={payload}")
             return
 

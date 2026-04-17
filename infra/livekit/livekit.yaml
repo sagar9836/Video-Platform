@@ -10,8 +10,11 @@ rtc:
   use_external_ip: false
   node_ip: "127.0.0.1"
 
+redis:
+  address: redis:6379
+
 keys:
-  devkey: "862176abb6dc458c91563e072725c6ff"
+  devkey: 1f221b798295dde71aa319ed2ca5b8615712d96e89fe5dc38c82f0333a6fe135
 
 room:
   auto_create: true

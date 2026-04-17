@@ -54,7 +54,7 @@ async def get_my_notifications(
         20,
     )
 
-    if user["role"] == UserRole.CREATOR:
+    if user["role"] == UserRole.CREATOR.value:
         creator = await db.scalar(
             select(Creator).where(Creator.user_id == int(user["sub"]))
         )

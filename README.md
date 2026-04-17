@@ -62,6 +62,28 @@ From the project root:
 docker compose up --build
 ```
 
+If Docker Hub is flaky and you hit errors like `TLS handshake timeout` while resolving base images,
+use the retrying helper script instead:
+
+Windows PowerShell:
+
+```powershell
+./scripts/docker-up.ps1
+```
+
+WSL / Linux:
+
+```bash
+chmod +x ./scripts/docker-up.sh
+./scripts/docker-up.sh
+```
+
+Those scripts pre-pull the required base images with retries, then run:
+- `docker compose build --pull=false`
+- `docker compose up -d --no-build`
+
+This avoids re-querying Docker Hub during every compose build when the images are already cached locally.
+
 Main URLs:
 - Frontend: `http://localhost:3000`
 - Backend API: `http://localhost:8000`
@@ -76,6 +98,9 @@ Compose services:
 - `zookeeper`
 - `kafka`
 - `ffmpeg`
+
+This now starts the React frontend and the backend stack together in Docker.
+The frontend runs through nginx on port `3000` and proxies API plus websocket chat traffic to the backend container.
 
 ## LiveKit Setup
 

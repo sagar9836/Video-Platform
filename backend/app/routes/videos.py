@@ -119,19 +119,23 @@ async def upload_direct(
     db: AsyncSession = Depends(get_db),
 ):
     creator = await _get_creator(db, int(user["sub"]))
+    clean_title = title.strip()
+    clean_description = description.strip()
 
     if video_id:
         video = await db.get(Video, video_id)
         if not video or video.creator_id != creator.id:
             raise HTTPException(403, "Unauthorized")
+        video.title = clean_title or video.title
+        video.description = clean_description
     else:
         video_uuid = uuid.uuid4().hex
         s3_key = f"videos/raw/{creator.id}/{video_uuid}/original.mp4"
 
         video = Video(
             creator_id=creator.id,
-            title=title.strip(),
-            description=description,
+            title=clean_title,
+            description=clean_description,
             s3_key=s3_key,
             status=VideoStatus.UPLOADED,
             visibility=VideoVisibility.PUBLIC,
@@ -203,6 +207,15 @@ async def complete_upload(
 
     video.status = VideoStatus.PROCESSING
     await db.commit()
+
+    await send_event(
+        VIDEO_UPLOADED,
+        {
+            "video_id": video.id,
+            "creator_id": video.creator_id,
+            "title": video.title,
+        },
+    )
 
     await _start_processing(video)
 
