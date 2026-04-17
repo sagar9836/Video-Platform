@@ -22,7 +22,7 @@ VIDEO_READY = "video.ready"
 VIDEO_FAILED = "video.failed"
 
 # 🔥 NEW EVENT
-LIVE_ENDED = "LIVE_ENDED"
+LIVE_ENDED = "live.ended"
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("ffmpeg-worker")

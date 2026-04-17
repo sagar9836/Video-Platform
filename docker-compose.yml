@@ -32,13 +32,13 @@ services:
       redis:
         condition: service_started
       livekit:
-        condition: service_started
+        condition: service_healthy
     ports:
       - "8000:8000"
     healthcheck:
-      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health', timeout=10)"]
       interval: 15s
-      timeout: 5s
+      timeout: 20s
       retries: 5
       start_period: 40s
     restart: unless-stopped
@@ -131,10 +131,10 @@ services:
 
     healthcheck:
       test: ["CMD-SHELL", "cub kafka-ready -b localhost:29092 1 30"]
-      interval: 10s
-      timeout: 10s
+      interval: 15s
+      timeout: 60s
       retries: 10
-      start_period: 20s
+      start_period: 60s
 
     restart: unless-stopped
     networks:
@@ -146,13 +146,19 @@ services:
     container_name: video-platform-livekit
     command: --config /etc/livekit.yaml
     volumes:
-      - ./infra/livekit/livekit.yaml:/etc/livekit.yaml
+      - ./infra/livekit/livekit.runtime.yaml:/etc/livekit.yaml
     depends_on:
       - redis
     ports:
       - "7880:7880"
       - "7881:7881"
       - "50000-50100:50000-50100/udp"
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "-", "http://localhost:7880/"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
     restart: unless-stopped
     networks:
       - video_platform_net
@@ -167,15 +173,18 @@ services:
       LIVEKIT_API_SECRET: 1f221b798295dde71aa319ed2ca5b8615712d96e89fe5dc38c82f0333a6fe135
       LIVEKIT_WS_URL: ws://livekit:7880
       EGRESS_CONFIG_FILE: /etc/egress.yaml
+    cap_add:
+      - SYS_ADMIN
+    network_mode: "service:livekit"
     volumes:
       - ./infra/livekit/egress.yaml:/etc/egress.yaml
       - recordings:/tmp   # 🔥 shared with ffmpeg
     depends_on:
-      - livekit
-      - redis
+      livekit:
+        condition: service_healthy
+      redis:
+        condition: service_started
     restart: unless-stopped
-    networks:
-      - video_platform_net
 
 # ---------------- NETWORK ----------------
 networks:

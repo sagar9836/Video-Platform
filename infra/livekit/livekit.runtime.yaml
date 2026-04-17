@@ -8,10 +8,10 @@ rtc:
   port_range_start: 50000
   port_range_end: 50100
   use_external_ip: false
-  node_ip: "172.23.58.167"
+  node_ip: "172.20.10.5"
 
 keys:
-  devkey: "862176abb6dc458c91563e072725c6ff"
+  devkey: "1f221b798295dde71aa319ed2ca5b8615712d96e89fe5dc38c82f0333a6fe135"
 
 room:
   auto_create: true

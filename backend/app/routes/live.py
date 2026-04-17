@@ -18,6 +18,7 @@ from app.schemas.live import LiveSessionUpsert, ViewerTokenRequest
 from app.services.livekit_service import create_egress_token, create_token
 from app.services.video_assets import build_video_play_url, build_video_thumbnail_url
 from app.kafka.producer import send_event
+from app.kafka.topics import LIVE_ENDED
 from app.services.live_presence import get_count
 
 router = APIRouter(prefix="/live", tags=["Live"])
@@ -237,7 +238,7 @@ async def end_live_session(
     await db.commit()
 
     # 🔥 Trigger processing
-    await send_event("LIVE_ENDED", {
+    await send_event(LIVE_ENDED, {
         "room_name": session.room_name,
         "creator_id": creator.id
     })
