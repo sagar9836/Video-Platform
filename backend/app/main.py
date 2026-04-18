@@ -39,11 +39,12 @@ notification_consumer_task: asyncio.Task | None = None
 live_chat_consumer_task: asyncio.Task | None = None
 
 graphql_app = GraphQLRouter(schema)
+allow_all_origins = "*" in settings.cors_origins
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
+    allow_origins=settings.cors_origins,
+    allow_credentials=not allow_all_origins,
     allow_methods=["*"],
     allow_headers=["*"],
 )

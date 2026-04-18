@@ -2,6 +2,7 @@ import { BrowserRouter, Routes, Route, Navigate } from "react-router-dom";
 import { useAuth } from "../auth/AuthContext";
 import ProtectedRoute from "./ProtectedRoute";
 import PublicVideoRoute from "./PublicVideoRoute";
+import AppShell from "../layouts/AppShell";
 
 /* PUBLIC */
 import Login from "../pages/Login";
@@ -11,6 +12,7 @@ import ForgotPassword from "../pages/ForgotPassword";
 /* USER */
 import Dashboard from "../pages/Dashboard";
 import ApplyCreator from "../pages/ApplyCreator";
+import SubscriptionsPage from "../pages/Subscriptions";
 
 /* CREATOR */
 import VideoUpload from "../pages/creator/VideoUpload";
@@ -37,95 +39,100 @@ function App() {
   return (
     <BrowserRouter>
       <Routes>
-        <Route path="/" element={<Dashboard />} />
+        <Route element={<AppShell />}>
+          <Route path="/" element={<Dashboard />} />
 
-        {/* PUBLIC */}
-        <Route path="/login" element={<Login />} />
-        <Route path="/register" element={<Register />} />
-        <Route path="/forgot-password" element={<ForgotPassword />} />
+          {/* PUBLIC */}
+          <Route path="/login" element={<Login />} />
+          <Route path="/register" element={<Register />} />
+          <Route path="/forgot-password" element={<ForgotPassword />} />
 
-        {/* USER */}
-        <Route
-          path="/dashboard"
-          element={
-            <ProtectedRoute>
-              <Dashboard />
-            </ProtectedRoute>
-          }
-        />
+          {/* USER */}
+          <Route
+            path="/dashboard"
+            element={
+              <ProtectedRoute>
+                <Dashboard />
+              </ProtectedRoute>
+            }
+          />
 
-        <Route
-          path="/creator/apply"
-          element={
-            <ProtectedRoute>
-              <ApplyCreator />
-            </ProtectedRoute>
-          }
-        />
+          <Route
+            path="/following"
+            element={
+              <ProtectedRoute>
+                <SubscriptionsPage />
+              </ProtectedRoute>
+            }
+          />
 
-        {/* CREATOR */}
-        <Route
-          path="/creator"
-          element={
-            <ProtectedRoute role="CREATOR">
-              <CreatorStudio />
-            </ProtectedRoute>
-          }
-        />
+          <Route
+            path="/creator/apply"
+            element={
+              <ProtectedRoute>
+                <ApplyCreator />
+              </ProtectedRoute>
+            }
+          />
 
-        <Route
-          path="/creator/upload"
-          element={
-            <ProtectedRoute role="CREATOR">
-              <VideoUpload />
-            </ProtectedRoute>
-          }
-        />
+          {/* CREATOR */}
+          <Route
+            path="/creator"
+            element={
+              <ProtectedRoute role="CREATOR">
+                <CreatorStudio />
+              </ProtectedRoute>
+            }
+          />
 
-        <Route
-          path="/creator/live"
-          element={
-            <ProtectedRoute role="CREATOR">
-              <LiveControl />
-            </ProtectedRoute>
-          }
-        />
+          <Route
+            path="/creator/upload"
+            element={
+              <ProtectedRoute role="CREATOR">
+                <VideoUpload />
+              </ProtectedRoute>
+            }
+          />
 
-        {/* PUBLIC CHANNEL */}
-        <Route
-          path="/channel/:creatorId"
-          element={<ChannelPage />}
-        />
+          <Route
+            path="/creator/live"
+            element={
+              <ProtectedRoute role="CREATOR">
+                <LiveControl />
+              </ProtectedRoute>
+            }
+          />
 
-        {/* VIDEO */}
-        <Route
-          path="/video/:videoId"
-          element={
-            <PublicVideoRoute>
-              <VideoPlayer />
-            </PublicVideoRoute>
-          }
-        />
-        <Route
-          path="/live/:creatorId"
-          element={<LiveWatch />}
-        />
+          {/* PUBLIC CHANNEL */}
+          <Route path="/channel/:creatorId" element={<ChannelPage />} />
 
-        {/* ADMIN */}
-        <Route
-          path="/admin"
-          element={
-            <ProtectedRoute role="ADMIN">
-              <AdminLayout />
-            </ProtectedRoute>
-          }
-        >
-          <Route index element={<AdminDashboard />} />
-          <Route path="creator-requests" element={<CreatorRequests />} />
-          <Route path="users" element={<Users />} />
-          <Route path="videos" element={<Videos />} />
-          <Route path="comments" element={<Comments />} />
-          <Route path="reports" element={<Reports />} />
+          {/* VIDEO */}
+          <Route
+            path="/video/:videoId"
+            element={
+              <PublicVideoRoute>
+                <VideoPlayer />
+              </PublicVideoRoute>
+            }
+          />
+          <Route path="/live/:creatorId" element={<LiveWatch />} />
+
+          {/* ADMIN */}
+          <Route
+            path="/admin"
+            element={
+              <ProtectedRoute role="ADMIN">
+                <AdminLayout />
+              </ProtectedRoute>
+            }
+          >
+            <Route index element={<AdminDashboard />} />
+            <Route path="creator-requests" element={<CreatorRequests />} />
+            <Route path="users" element={<Users />} />
+            <Route path="videos" element={<Videos />} />
+            <Route path="comments" element={<Comments />} />
+            <Route path="reports" element={<Reports />} />
+          </Route>
         </Route>
 
         {/* FALLBACK */}

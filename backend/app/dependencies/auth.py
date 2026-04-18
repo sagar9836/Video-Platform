@@ -77,6 +77,11 @@ async def get_current_user(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="User account is blocked",
         )
+    if not db_user.is_email_verified:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Email not verified",
+        )
 
     return payload
 
@@ -96,7 +101,7 @@ async def get_current_user_optional(
         return None
 
     db_user = await db.get(User, int(payload["sub"]))
-    if not db_user or not db_user.is_active:
+    if not db_user or not db_user.is_active or not db_user.is_email_verified:
         return None
 
     return payload

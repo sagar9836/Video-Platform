@@ -57,6 +57,7 @@ def _coerce_bool(value: object) -> bool:
 class Settings(BaseModel):
     app_name: str = "Video Streaming Platform"
     debug: bool = False
+    cors_origins: list[str] = ["http://localhost:3000", "http://127.0.0.1:3000"]
 
     database_url: str = f"sqlite+aiosqlite:///{DEFAULT_SQLITE_DB}"
 
@@ -125,6 +126,16 @@ class Settings(BaseModel):
 
         if "debug" in data:
             data["debug"] = _coerce_debug(data["debug"])
+        if "cors_origins" in data and isinstance(data["cors_origins"], str):
+            raw_origins = data["cors_origins"].strip()
+            if raw_origins == "*":
+                data["cors_origins"] = ["*"]
+            else:
+                data["cors_origins"] = [
+                    origin.strip()
+                    for origin in raw_origins.split(",")
+                    if origin.strip()
+                ]
         if "smtp_use_tls" in data:
             data["smtp_use_tls"] = _coerce_bool(data["smtp_use_tls"])
         if "smtp_use_ssl" in data:

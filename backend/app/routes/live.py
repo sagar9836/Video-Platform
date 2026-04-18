@@ -18,7 +18,7 @@ from app.schemas.live import LiveSessionUpsert, ViewerTokenRequest
 from app.services.livekit_service import create_egress_token, create_token
 from app.services.video_assets import build_video_play_url, build_video_thumbnail_url
 from app.kafka.producer import send_event
-from app.kafka.topics import LIVE_ENDED
+from app.kafka.topics import LIVE_ENDED, LIVE_STARTED
 from app.services.live_presence import get_count
 
 router = APIRouter(prefix="/live", tags=["Live"])
@@ -152,6 +152,15 @@ async def start_live_session(
     db.add(session)
     await db.commit()
     await db.refresh(session)
+
+    await send_event(
+        LIVE_STARTED,
+        {
+            "creator_id": creator.id,
+            "title": session.title,
+            "join_url": f"/live/{creator.id}",
+        },
+    )
 
     return {"session": _serialize_session(session)}
 

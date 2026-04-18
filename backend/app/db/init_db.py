@@ -48,6 +48,26 @@ async def create_tables():
         )
         await conn.execute(
             text(
+                "ALTER TABLE users "
+                "ADD COLUMN IF NOT EXISTS is_email_verified BOOLEAN "
+                "NOT NULL DEFAULT FALSE"
+            )
+        )
+        await conn.execute(
+            text(
+                "ALTER TABLE users "
+                "ADD COLUMN IF NOT EXISTS email_verified_at TIMESTAMPTZ"
+            )
+        )
+        await conn.execute(
+            text(
+                "ALTER TABLE users "
+                "ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ "
+                "NOT NULL DEFAULT NOW()"
+            )
+        )
+        await conn.execute(
+            text(
                 "ALTER TABLE live_sessions "
                 "ADD COLUMN IF NOT EXISTS description VARCHAR(2000) "
                 "NOT NULL DEFAULT ''"
@@ -87,6 +107,7 @@ async def create_bootstrap_admin():
             email=ADMIN_EMAIL,
             hashed_password=hash_password(ADMIN_PASSWORD),
             role=UserRole.ADMIN,
+            is_email_verified=True,
         )
         db.add(admin)
         await db.commit()

@@ -2,6 +2,7 @@
 
 Full-stack video platform with:
 - JWT authentication
+- email verification during registration
 - creator onboarding and channel setup
 - direct video uploads and VOD processing
 - subscriptions, comments, analytics, and admin flows
@@ -18,8 +19,10 @@ Full-stack video platform with:
 
 ### Frontend
 - React + Vite app in [frontend/src/app/App.jsx](/c:/Users/sagar/Desktop/docker/Video-Platform/frontend/src/app/App.jsx)
+- shared app shell + navbar in [frontend/src/components/layout/Navbar.jsx](/c:/Users/sagar/Desktop/docker/Video-Platform/frontend/src/components/layout/Navbar.jsx)
 - creator live studio in [frontend/src/pages/creator/LiveControl.jsx](/c:/Users/sagar/Desktop/docker/Video-Platform/frontend/src/pages/creator/LiveControl.jsx)
 - public live watch page in [frontend/src/pages/live/LiveWatch.jsx](/c:/Users/sagar/Desktop/docker/Video-Platform/frontend/src/pages/live/LiveWatch.jsx)
+- subscribed channels page in [frontend/src/pages/Subscriptions.jsx](/c:/Users/sagar/Desktop/docker/Video-Platform/frontend/src/pages/Subscriptions.jsx)
 
 ### Infrastructure
 - Docker Compose stack in [docker-compose.yml](/c:/Users/sagar/Desktop/docker/Video-Platform/docker-compose.yml)
@@ -101,6 +104,16 @@ Compose services:
 
 This now starts the React frontend and the backend stack together in Docker.
 The frontend runs through nginx on port `3000` and proxies API plus websocket chat traffic to the backend container.
+
+## Product Updates
+
+- shared navbar with back + home navigation across the app
+- subscribed channels hub with live join buttons
+- navbar live notifications fed by creator uploads and live starts
+- registration email verification before login
+- upload-time visibility selection plus active creator-side public/private/delete controls
+- more consistent video card sizing across feed and channel/studio pages
+- thumbnail generation now samples the uploaded video dynamically instead of using a fixed timestamp
 
 ## LiveKit Setup
 
@@ -200,3 +213,41 @@ If you see bash syntax errors from `start-livekit.ps1`, you ran the PowerShell s
 - The older RTMP/nginx live flow has been removed from the active app path.
 - VOD processing still depends on Kafka + FFmpeg + S3/CloudFront.
 - Full runtime still depends on valid Docker, AWS, SMTP, and local network setup.
+
+## AWS Deployment Notes
+
+This repository is closer to production deployment now, but you still need to provide the real infrastructure values before shipping.
+
+Set these environment variables for a deployed environment:
+- `VITE_API_BASE_URL`
+- `CORS_ORIGINS`
+- `DATABASE_URL`
+- `AWS_ACCESS_KEY_ID`
+- `AWS_SECRET_ACCESS_KEY`
+- `AWS_REGION`
+- `S3_BUCKET`
+- `CLOUDFRONT_DOMAIN`
+- `SMTP_HOST`
+- `SMTP_PORT`
+- `SMTP_USERNAME`
+- `SMTP_PASSWORD`
+- `EMAIL_FROM`
+- `LIVEKIT_PUBLIC_URL`
+- `LIVEKIT_API_KEY`
+- `LIVEKIT_API_SECRET`
+
+Recommended AWS shape:
+- frontend container behind ALB or CloudFront
+- API container on ECS/Fargate or EC2 behind ALB
+- PostgreSQL on RDS
+- Redis on ElastiCache
+- S3 for source uploads, HLS output, and thumbnails
+- CloudFront in front of video assets
+- LiveKit on a publicly reachable host or cluster with correct UDP/TCP exposure
+
+Before deploying:
+- point `CORS_ORIGINS` at your real frontend domain, not `*`
+- point `LIVEKIT_PUBLIC_URL` at the public LiveKit endpoint that viewers can reach
+- configure SMTP so registration verification and reset emails can be delivered
+- verify CloudFront is serving both `videos/hls/` and `videos/thumbnails/`
+- keep Kafka/worker services running so uploaded videos are actually processed

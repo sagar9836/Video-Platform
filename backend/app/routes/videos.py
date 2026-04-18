@@ -15,11 +15,16 @@ from app.core.config import settings
 from app.db.session import get_db
 from app.models.creator import Creator
 from app.models.video import Video, VideoStatus, VideoVisibility
-from app.schemas.video import VideoCreateRequest, VideoUploadResponse
+from app.schemas.video import (
+    VideoCreateRequest,
+    VideoUploadResponse,
+    VideoVisibilityUpdateRequest,
+)
 from app.dependencies.auth import get_current_user
 from app.kafka.producer import send_event
 from app.kafka.topics import VIDEO_PROCESSING_STARTED, VIDEO_UPLOADED
 from app.redis.client import redis_client
+from app.services.video_assets import delete_video_assets
 from app.utils.s3 import generate_presigned_upload_url
 
 router = APIRouter(prefix="/videos", tags=["Videos"])
@@ -69,6 +74,16 @@ def _check_s3(key: str):
     s3.head_object(Bucket=settings.s3_bucket, Key=key)
 
 
+def _resolve_visibility(raw_visibility: str | None) -> VideoVisibility:
+    if not raw_visibility:
+        return VideoVisibility.PUBLIC
+
+    try:
+        return VideoVisibility(str(raw_visibility).upper())
+    except ValueError as exc:
+        raise HTTPException(400, "Invalid visibility") from exc
+
+
 # ======================================================
 # 🎥 CREATE UPLOAD SESSION (PRESIGNED)
 # ======================================================
@@ -80,6 +95,7 @@ async def create_upload(
     db: AsyncSession = Depends(get_db),
 ):
     creator = await _get_creator(db, int(user["sub"]))
+    visibility = _resolve_visibility(data.visibility)
 
     video_uuid = uuid.uuid4().hex
     s3_key = f"videos/raw/{creator.id}/{video_uuid}/original.mp4"
@@ -90,7 +106,7 @@ async def create_upload(
         description=data.description or "",
         s3_key=s3_key,
         status=VideoStatus.AWAITING_UPLOAD,
-        visibility=VideoVisibility.PUBLIC,
+        visibility=visibility,
     )
 
     db.add(video)
@@ -113,6 +129,7 @@ async def create_upload(
 async def upload_direct(
     title: str = Form(...),
     description: str = Form(""),
+    visibility: str = Form("PUBLIC"),
     file: UploadFile = File(...),
     video_id: int | None = Form(None),
     user=Depends(get_current_user),
@@ -121,6 +138,7 @@ async def upload_direct(
     creator = await _get_creator(db, int(user["sub"]))
     clean_title = title.strip()
     clean_description = description.strip()
+    next_visibility = _resolve_visibility(visibility)
 
     if video_id:
         video = await db.get(Video, video_id)
@@ -128,6 +146,7 @@ async def upload_direct(
             raise HTTPException(403, "Unauthorized")
         video.title = clean_title or video.title
         video.description = clean_description
+        video.visibility = next_visibility
     else:
         video_uuid = uuid.uuid4().hex
         s3_key = f"videos/raw/{creator.id}/{video_uuid}/original.mp4"
@@ -138,7 +157,7 @@ async def upload_direct(
             description=clean_description,
             s3_key=s3_key,
             status=VideoStatus.UPLOADED,
-            visibility=VideoVisibility.PUBLIC,
+            visibility=next_visibility,
         )
 
         db.add(video)
@@ -274,3 +293,56 @@ async def play(video_id: int, db: AsyncSession = Depends(get_db)):
         "hls_url": hls_url,
         "thumbnail_url": thumbnail_url,
     }
+
+
+@router.patch("/{video_id}/visibility")
+async def update_visibility(
+    video_id: int,
+    data: VideoVisibilityUpdateRequest,
+    user=Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    creator = await _get_creator(db, int(user["sub"]))
+    video = await db.get(Video, video_id)
+
+    if not video:
+        raise HTTPException(404, "Video not found")
+    if video.creator_id != creator.id:
+        raise HTTPException(403, "Unauthorized")
+
+    video.visibility = _resolve_visibility(data.visibility)
+    await db.commit()
+    await db.refresh(video)
+
+    return {
+        "video_id": video.id,
+        "visibility": video.visibility.value,
+    }
+
+
+@router.delete("/{video_id}")
+async def delete_video(
+    video_id: int,
+    user=Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    creator = await _get_creator(db, int(user["sub"]))
+    video = await db.get(Video, video_id)
+
+    if not video:
+        raise HTTPException(404, "Video not found")
+    if video.creator_id != creator.id:
+        raise HTTPException(403, "Unauthorized")
+
+    try:
+        await asyncio.to_thread(delete_video_assets, video)
+    except Exception:
+        logger.exception("Failed deleting video assets for video_id=%s", video_id)
+
+    await db.delete(video)
+    await db.commit()
+
+    await redis_client.delete(f"video:{video_id}:status")
+    await redis_client.delete(f"video:{video_id}:error")
+
+    return {"detail": "Video deleted"}

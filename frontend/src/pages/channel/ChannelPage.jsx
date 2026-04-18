@@ -92,7 +92,7 @@ export default function ChannelPage() {
         minHeight: "100vh",
         px: { xs: 2, md: 4 },
         py: 4,
-        background: "linear-gradient(180deg, #0f0f0f 0%, #111111 100%)",
+        background: "transparent",
       }}
     >
       <Stack spacing={3} sx={{ maxWidth: 1200, mx: "auto" }}>
@@ -104,8 +104,9 @@ export default function ChannelPage() {
             p: { xs: 3, md: 4 },
             color: "#fff",
             background:
-              "linear-gradient(90deg, rgba(0,0,0,0.95) 0%, rgba(34,34,34,0.92) 100%)",
+              "linear-gradient(115deg, rgba(8,8,12,0.95) 0%, rgba(63,16,23,0.92) 52%, rgba(17,17,19,0.88) 100%)",
             border: "1px solid rgba(255,255,255,0.08)",
+            boxShadow: "0 26px 70px rgba(0,0,0,0.22)",
           }}
         >
           <Stack
@@ -138,6 +139,17 @@ export default function ChannelPage() {
                   {channel.description}
                 </Typography>
               )}
+
+              <Stack direction="row" spacing={1} sx={{ mt: 2, flexWrap: "wrap" }}>
+                <Chip
+                  label={`${channel.videosCount ?? videos.length} videos`}
+                  sx={{ bgcolor: "rgba(255,255,255,0.12)", color: "#fff" }}
+                />
+                <Chip
+                  label={isSubscribed ? "Subscribed" : "Not subscribed"}
+                  sx={{ bgcolor: "rgba(255,255,255,0.08)", color: "#fff" }}
+                />
+              </Stack>
             </Box>
 
             <Stack direction={{ xs: "column", sm: "row" }} spacing={1.5}>
@@ -173,7 +185,7 @@ export default function ChannelPage() {
             Videos
           </Typography>
 
-          <Grid container spacing={3}>
+          <Grid container spacing={3} alignItems="stretch">
             {videos.length === 0 ? (
               <Typography sx={{ px: 2, color: "text.secondary" }}>
                 No videos uploaded yet.

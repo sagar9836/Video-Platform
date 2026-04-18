@@ -7,7 +7,6 @@ import {
   GUEST_SESSION_LIMIT_MS,
 } from "../auth/guestSession";
 
-import Navbar from "../components/layout/Navbar";
 import VideoCard from "../components/common/VideoCard";
 import { fetchDashboardFeedGraphql } from "../api/graphql.api";
 
@@ -73,11 +72,9 @@ function Dashboard() {
     <Box
       sx={{
         minHeight: "100vh",
-        background: "linear-gradient(180deg, #0f0f0f 0%, #101010 100%)",
+        background: "transparent",
       }}
     >
-      <Navbar />
-
       <Box sx={{ px: { xs: 2, md: 4 }, py: { xs: 2, md: 4 }, maxWidth: 1440, mx: "auto" }}>
         <Box
           sx={{
@@ -267,7 +264,7 @@ function Dashboard() {
         )}
 
         {!loading && videos.length > 0 && (
-          <Grid container spacing={2.5}>
+          <Grid container spacing={2.5} alignItems="stretch">
             {videos.map((video) => (
               <Grid item key={video.id} xs={12} sm={6} md={4} lg={3}>
                 <VideoCard video={video} />

@@ -1,17 +1,22 @@
 import { useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { loginUser } from "../api/auth.api";
+import {
+  confirmEmailVerification,
+  loginUser,
+  requestEmailVerification,
+} from "../api/auth.api";
 import { useAuth } from "../auth/AuthContext";
 
 import {
+  Alert,
   Box,
   Button,
   Card,
   CardContent,
+  CircularProgress,
+  Stack,
   TextField,
   Typography,
-  CircularProgress,
-  Alert,
 } from "@mui/material";
 
 function Login() {
@@ -20,8 +25,11 @@ function Login() {
 
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
+  const [verificationCode, setVerificationCode] = useState("");
   const [error, setError] = useState("");
+  const [success, setSuccess] = useState("");
   const [loading, setLoading] = useState(false);
+  const [verificationRequired, setVerificationRequired] = useState(false);
 
   const handleLogin = async (e) => {
     e.preventDefault();
@@ -34,6 +42,7 @@ function Login() {
     try {
       setLoading(true);
       setError("");
+      setSuccess("");
 
       const data = await loginUser({ email, password });
 
@@ -44,11 +53,43 @@ function Login() {
       // 🔑 login handles token + redirect
       login(data.access_token);
     } catch (err) {
+      const detail = err?.response?.data?.detail || err.message || "Login failed";
+      if (String(detail).toLowerCase().includes("email not verified")) {
+        setVerificationRequired(true);
+      }
       setError(
-        err?.response?.data?.detail ||
-        err.message ||
-        "Login failed"
+        detail
       );
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleVerify = async () => {
+    try {
+      setLoading(true);
+      setError("");
+      setSuccess("");
+      const data = await confirmEmailVerification({
+        email,
+        code: verificationCode,
+      });
+      login(data.access_token);
+    } catch (err) {
+      setError(err?.response?.data?.detail || "Verification failed");
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleResend = async () => {
+    try {
+      setLoading(true);
+      setError("");
+      const data = await requestEmailVerification({ email });
+      setSuccess(data?.detail || "Verification code sent");
+    } catch (err) {
+      setError(err?.response?.data?.detail || "Unable to resend verification code");
     } finally {
       setLoading(false);
     }
@@ -57,7 +98,7 @@ function Login() {
   return (
     <Box
       sx={{
-        minHeight: "100vh",
+        minHeight: "calc(100vh - 74px)",
         display: "flex",
         alignItems: "center",
         justifyContent: "center",
@@ -94,7 +135,10 @@ function Login() {
               label="Email"
               margin="normal"
               value={email}
-              onChange={(e) => setEmail(e.target.value)}
+              onChange={(e) => {
+                setEmail(e.target.value);
+                setVerificationRequired(false);
+              }}
               InputProps={{
                 sx: {
                   borderRadius: 3,
@@ -109,7 +153,10 @@ function Login() {
               type="password"
               margin="normal"
               value={password}
-              onChange={(e) => setPassword(e.target.value)}
+              onChange={(e) => {
+                setPassword(e.target.value);
+                setVerificationRequired(false);
+              }}
               InputProps={{
                 sx: {
                   borderRadius: 3,
@@ -132,11 +179,56 @@ function Login() {
             </Typography>
 
             {error && <Alert severity="error">{error}</Alert>}
+            {success && <Alert severity="success">{success}</Alert>}
+
+            {verificationRequired && (
+              <Stack spacing={1.5} sx={{ mt: 2 }}>
+                <TextField
+                  fullWidth
+                  label="Email verification code"
+                  value={verificationCode}
+                  onChange={(e) => setVerificationCode(e.target.value)}
+                  InputProps={{
+                    sx: {
+                      borderRadius: 3,
+                      bgcolor: "rgba(255,255,255,0.04)",
+                    },
+                  }}
+                />
+                <Stack direction={{ xs: "column", sm: "row" }} spacing={1}>
+                  <Button
+                    fullWidth
+                    variant="contained"
+                    onClick={handleVerify}
+                    disabled={loading}
+                    sx={{
+                      borderRadius: 999,
+                      background: "linear-gradient(135deg, #e50914, #ff7b54)",
+                    }}
+                  >
+                    Verify email
+                  </Button>
+                  <Button
+                    fullWidth
+                    variant="outlined"
+                    onClick={handleResend}
+                    disabled={loading}
+                    sx={{
+                      borderRadius: 999,
+                      color: "#fff",
+                      borderColor: "rgba(255,255,255,0.18)",
+                    }}
+                  >
+                    Resend code
+                  </Button>
+                </Stack>
+              </Stack>
+            )}
 
             <Button
               type="submit"
               fullWidth
-              disabled={loading}
+              disabled={loading || verificationRequired}
               sx={{
                 mt: 3,
                 py: 1.3,

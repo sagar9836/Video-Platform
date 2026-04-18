@@ -85,12 +85,17 @@ async def handle_event(topic: str, data: dict[str, Any]):
             return
 
         title = data.get("title", "Untitled Video")
+        join_url = data.get("join_url")
+        video_id = data.get("video_id")
 
         try:
             if topic == VIDEO_READY:
                 await notify_creator(
                     creator_id=creator_id,
                     message=f"🎉 Your video '{title}' is ready!",
+                    notification_type="video-ready",
+                    title=title,
+                    video_id=video_id,
                 )
 
             elif topic == VIDEO_UPLOADED:
@@ -98,6 +103,9 @@ async def handle_event(topic: str, data: dict[str, Any]):
                     creator_id=creator_id,
                     message=f"📢 New video uploaded: {title}",
                     db=db,
+                    notification_type="video-uploaded",
+                    title=title,
+                    video_id=video_id,
                 )
 
             elif topic == LIVE_STARTED:
@@ -105,18 +113,26 @@ async def handle_event(topic: str, data: dict[str, Any]):
                     creator_id=creator_id,
                     message="🔴 Live stream started",
                     db=db,
+                    notification_type="live-started",
+                    title=data.get("title", "Live stream"),
+                    join_url=join_url,
                 )
 
             elif topic == LIVE_ENDED:
                 await notify_creator(
                     creator_id=creator_id,
                     message="📴 Your live stream has ended",
+                    notification_type="live-ended",
+                    title=data.get("title", "Live stream"),
                 )
 
             elif topic == VIDEO_FAILED:
                 await notify_creator(
                     creator_id=creator_id,
                     message=f"❌ Your video '{title}' failed to process",
+                    notification_type="video-failed",
+                    title=title,
+                    video_id=video_id,
                 )
 
         except Exception:

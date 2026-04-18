@@ -29,6 +29,9 @@ export default function VideoCard({ video }) {
       onClick={handleClick}
       sx={{
         width: "100%",
+        height: "100%",
+        display: "flex",
+        flexDirection: "column",
         cursor: isReady ? "pointer" : "default",
         bgcolor: "transparent",
         color: "#fff",
@@ -85,7 +88,7 @@ export default function VideoCard({ video }) {
         />
       </Box>
 
-      <CardContent sx={{ p: 1.5 }}>
+      <CardContent sx={{ p: 1.5, display: "flex", flex: 1 }}>
         <Stack spacing={1.2}>
           <Typography
             variant="subtitle1"
@@ -106,7 +109,7 @@ export default function VideoCard({ video }) {
             {video.creatorName || "VideoPlatform creator"}
           </Typography>
 
-          <Stack direction="row" spacing={1} flexWrap="wrap">
+          <Stack direction="row" spacing={1} flexWrap="wrap" sx={{ mt: "auto" }}>
             <Chip
               size="small"
               label={isReady ? "Watch" : "Preparing"}

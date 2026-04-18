@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { useParams } from "react-router-dom";
-import { Alert, Box, Button, CircularProgress, Stack, Typography } from "@mui/material";
+import { Box, Button, Chip, CircularProgress, Stack, Typography } from "@mui/material";
 import LiveChatPanel from "../../components/live/LiveChatPanel";
 import LiveStreamPlayer from "../../components/live/LiveStreamPlayer";
 import { fetchLiveRoom, issueViewerToken } from "../../api/live.api";
@@ -133,17 +133,37 @@ export default function LiveWatch() {
   }
 
   return (
-    <Box sx={{ maxWidth: 1200, mx: "auto", p: 3 }}>
+    <Box sx={{ maxWidth: 1280, mx: "auto", p: { xs: 2, md: 3 } }}>
       <Stack spacing={2}>
-        <Typography variant="h4" fontWeight={800}>
-          {streamState?.title || "Live room"}
-        </Typography>
+        <Box
+          sx={{
+            p: { xs: 2.5, md: 3.5 },
+            borderRadius: 5,
+            color: "#fff",
+            background:
+              "linear-gradient(120deg, rgba(10,10,14,0.95) 0%, rgba(66,15,23,0.94) 55%, rgba(15,15,18,0.9) 100%)",
+            border: "1px solid rgba(255,255,255,0.08)",
+          }}
+        >
+          <Stack direction={{ xs: "column", md: "row" }} justifyContent="space-between" spacing={2}>
+            <Box>
+              <Typography variant="h4" fontWeight={800}>
+                {streamState?.title || "Live room"}
+              </Typography>
+              <Typography sx={{ mt: 1, color: "rgba(255,255,255,0.72)" }}>
+                Join the stream, keep chat open, and stay synced with the creator room.
+              </Typography>
+            </Box>
 
-        {streamState?.mode === "live" && (
-          <Typography color="error" fontWeight={700}>
-            🔴 LIVE • {viewerCount} watching
-          </Typography>
-        )}
+            {streamState?.mode === "live" && (
+              <Chip
+                label={`LIVE • ${viewerCount} watching`}
+                color="error"
+                sx={{ alignSelf: "flex-start", color: "#fff", fontWeight: 800 }}
+              />
+            )}
+          </Stack>
+        </Box>
 
         {error && <Typography color="error">{error}</Typography>}
 

@@ -9,10 +9,11 @@ export const uploadVideo = async (formData) => {
   return res.data;
 };
 
-export const createVideoUpload = async ({ title, description }) => {
+export const createVideoUpload = async ({ title, description, visibility }) => {
   const res = await api.post("/videos/upload", {
     title,
     description,
+    visibility,
   });
   return res.data;
 };

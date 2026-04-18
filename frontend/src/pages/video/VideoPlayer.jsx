@@ -25,6 +25,7 @@ import {
   Typography,
   Avatar,
   Button,
+  Chip,
   Stack,
   Divider,
   CircularProgress,
@@ -299,9 +300,16 @@ export default function VideoPlayer() {
         {video?.title}
       </Typography>
 
-      <Typography color="text.secondary" sx={{ color: "rgba(255,255,255,0.56)" }}>
-        {stats.views} views
-      </Typography>
+      <Stack direction="row" spacing={1} sx={{ mt: 1, flexWrap: "wrap" }}>
+        <Chip
+          label={`${stats.views} views`}
+          sx={{ bgcolor: "rgba(255,255,255,0.06)", color: "#fff" }}
+        />
+        <Chip
+          label={creator?.channelName || "Creator channel"}
+          sx={{ bgcolor: "rgba(255,255,255,0.06)", color: "#fff" }}
+        />
+      </Stack>
 
       {creator && (
         <Stack

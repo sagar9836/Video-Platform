@@ -10,6 +10,16 @@ export const registerUser = async (payload) => {
   return res.data;
 };
 
+export const requestEmailVerification = async (payload) => {
+  const res = await api.post("/auth/verify-email/request", payload);
+  return res.data;
+};
+
+export const confirmEmailVerification = async (payload) => {
+  const res = await api.post("/auth/verify-email/confirm", payload);
+  return res.data;
+};
+
 export const requestPasswordReset = async (payload) => {
   const res = await api.post("/auth/forgot-password/request", payload);
   return res.data;

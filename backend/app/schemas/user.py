@@ -38,4 +38,5 @@ class UserProfileResponse(BaseModel):
     id: int
     email: str
     role: str
+    is_email_verified: bool
     creator: Optional[CreatorInfo] = None

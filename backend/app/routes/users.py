@@ -1,3 +1,5 @@
+import json
+
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -10,6 +12,28 @@ from app.redis.client import redis_client
 from app.schemas.user import UserProfileResponse
 
 router = APIRouter(prefix="/users", tags=["Users"])
+
+
+def _decode_notification(raw_value):
+    if isinstance(raw_value, bytes):
+        raw_value = raw_value.decode()
+
+    if isinstance(raw_value, str):
+        try:
+            return json.loads(raw_value)
+        except json.JSONDecodeError:
+            return {
+                "type": "message",
+                "message": raw_value,
+            }
+
+    if isinstance(raw_value, dict):
+        return raw_value
+
+    return {
+        "type": "message",
+        "message": str(raw_value),
+    }
 
 
 @router.get("/me", response_model=UserProfileResponse)
@@ -31,6 +55,7 @@ async def get_my_profile(
         "id": db_user.id,
         "email": db_user.email,
         "role": db_user.role,
+        "is_email_verified": db_user.is_email_verified,
         "creator": (
             {
                 "id": creator.id,
@@ -66,4 +91,9 @@ async def get_my_notifications(
             )
             notifications = creator_notifications + notifications
 
-    return {"notifications": notifications}
+    decoded = [_decode_notification(notification) for notification in notifications]
+
+    return {
+        "notifications": decoded,
+        "count": len(decoded),
+    }

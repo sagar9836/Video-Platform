@@ -5,8 +5,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.db.session import get_db
 from app.dependencies.auth import get_current_user
 from app.models.creator import Creator
+from app.models.live_session import LiveSession, LiveSessionStatus
+from app.models.premiere_session import PremiereSession, PremiereSessionStatus
 from app.models.subscription import Subscription
 from app.models.user import User
+from app.schemas.subscription import SubscriptionChannelResponse
 from app.services.email_service import send_email
 
 router = APIRouter(prefix="/subscriptions", tags=["Subscriptions"])
@@ -92,15 +95,63 @@ async def unsubscribe(
     return {"detail": "Unsubscribed"}
 
 
-@router.get("/me")
+@router.get("/me", response_model=list[SubscriptionChannelResponse])
 async def my_subscriptions(
     user=Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
     result = await db.execute(
-        select(Subscription.creator_id).where(Subscription.user_id == int(user["sub"]))
+        select(Subscription, Creator)
+        .join(Creator, Creator.id == Subscription.creator_id)
+        .where(Subscription.user_id == int(user["sub"]))
+        .order_by(Creator.channel_name.asc())
     )
-    return [row[0] for row in result.all()]
+    subscriptions = result.all()
+
+    channel_rows: list[SubscriptionChannelResponse] = []
+    for subscription, creator in subscriptions:
+        live_session = await db.scalar(
+            select(LiveSession)
+            .where(
+                LiveSession.creator_id == creator.id,
+                LiveSession.status == LiveSessionStatus.LIVE,
+            )
+            .order_by(LiveSession.id.desc())
+            .limit(1)
+        )
+        premiere_session = await db.scalar(
+            select(PremiereSession)
+            .where(
+                PremiereSession.creator_id == creator.id,
+                PremiereSession.status.in_(
+                    [PremiereSessionStatus.SCHEDULED, PremiereSessionStatus.LIVE]
+                ),
+            )
+            .order_by(PremiereSession.scheduled_start_at.desc(), PremiereSession.id.desc())
+            .limit(1)
+        )
+        is_live = live_session is not None or premiere_session is not None
+
+        channel_rows.append(
+            SubscriptionChannelResponse(
+                creator_id=creator.id,
+                channel_name=creator.channel_name,
+                description=creator.description or "",
+                subscribers_count=creator.subscribers_count,
+                is_live=is_live,
+                is_premiere=bool(
+                    premiere_session
+                    and premiere_session.status in (
+                        PremiereSessionStatus.SCHEDULED,
+                        PremiereSessionStatus.LIVE,
+                    )
+                ),
+                channel_url=f"/channel/{creator.id}",
+                live_url=f"/live/{creator.id}" if is_live else None,
+            )
+        )
+
+    return channel_rows
 
 
 @router.get("/creator/{creator_id}")

@@ -43,6 +43,7 @@ export default function VideoUpload() {
 
   const [title, setTitle] = useState("");
   const [description, setDescription] = useState("");
+  const [visibility, setVisibility] = useState("PUBLIC");
   const [file, setFile] = useState(null);
 
   const [loading, setLoading] = useState(false);
@@ -111,6 +112,7 @@ export default function VideoUpload() {
       const { video_id, upload_url } = await createVideoUpload({
         title: title.trim(),
         description,
+        visibility,
       });
 
       setVideoId(video_id);
@@ -134,6 +136,7 @@ export default function VideoUpload() {
         formData.append("description", description);
         formData.append("file", file);
         formData.append("video_id", video_id);
+        formData.append("visibility", visibility);
 
         await uploadVideo(formData);
 
@@ -187,6 +190,18 @@ export default function VideoUpload() {
               fullWidth
               multiline
             />
+
+            <TextField
+              select
+              fullWidth
+              label="Visibility"
+              value={visibility}
+              onChange={(e) => setVisibility(e.target.value)}
+              SelectProps={{ native: true }}
+            >
+              <option value="PUBLIC">Public</option>
+              <option value="PRIVATE">Private</option>
+            </TextField>
 
             <Button component="label" variant="outlined">
               {file ? "Change File" : "Select Video"}

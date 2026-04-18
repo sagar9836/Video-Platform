@@ -81,7 +81,7 @@ function ForgotPassword() {
   return (
     <Box
       sx={{
-        minHeight: "100vh",
+        minHeight: "calc(100vh - 74px)",
         display: "flex",
         alignItems: "center",
         justifyContent: "center",
