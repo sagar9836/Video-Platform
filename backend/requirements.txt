@@ -16,4 +16,4 @@ httpx
 strawberry-graphql[fastapi]
 aiofiles
 jinja2
-livekit-api
+livekit-api>=0.8.0
