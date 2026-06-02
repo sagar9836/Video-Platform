@@ -109,7 +109,7 @@ export default function VideoUpload() {
 
       // 🟢 STEP 1: Create upload session
       setStage("requesting");
-      const { video_id, upload_url } = await createVideoUpload({
+      const { video_id, upload_url, storage_backend } = await createVideoUpload({
         title: title.trim(),
         description,
         visibility,
@@ -117,9 +117,31 @@ export default function VideoUpload() {
 
       setVideoId(video_id);
 
-      // 🟡 STEP 2: Upload to S3
+      // 🟡 STEP 2: Upload to storage
       setStage("uploading");
 
+      if (storage_backend === "local") {
+        const formData = new FormData();
+        formData.append("title", title);
+        formData.append("description", description);
+        formData.append("file", file);
+        formData.append("video_id", video_id);
+        formData.append("visibility", visibility);
+
+        await uploadVideo(formData, {
+          onUploadProgress: (e) => {
+            if (!e.total) return;
+            const percent = Math.round((e.loaded * 100) / e.total);
+            setUploadPercent(percent);
+          },
+        });
+
+        setStage("processing");
+        setMessage("Upload complete. Processing started...");
+        return;
+      }
+
+      let usedDirectUpload = false;
       try {
         await axios.put(upload_url, file, {
           headers: { "Content-Type": file.type },
@@ -139,13 +161,16 @@ export default function VideoUpload() {
         formData.append("visibility", visibility);
 
         await uploadVideo(formData);
+        usedDirectUpload = true;
 
         setMessage("Fallback upload used");
       }
 
-      // 🔴 STEP 3: COMPLETE (CRITICAL FIX)
+      // 🔴 STEP 3: COMPLETE
       setStage("processing");
-      await completeUpload({ video_id });
+      if (!usedDirectUpload) {
+        await completeUpload({ video_id });
+      }
 
       setMessage("Upload complete. Processing started...");
     } catch (err) {

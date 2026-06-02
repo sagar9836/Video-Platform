@@ -2,9 +2,7 @@ from __future__ import annotations
 
 from typing import Optional, cast
 
-import boto3
 import strawberry
-from botocore.exceptions import ClientError
 from fastapi import HTTPException, Request
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -23,11 +21,13 @@ from app.models.subscription import Subscription
 from app.models.user import User, UserRole
 from app.models.video import Video, VideoStatus, VideoVisibility
 from app.models.video_analytics import VideoAnalytics
+from app.services.storage import is_local_storage, local_asset_exists
 from app.services.video_assets import build_video_play_url, build_video_thumbnail_url
+from app.utils.aws import create_aws_client
 
 
 def _get_s3_client():
-    return boto3.client("s3", region_name=settings.aws_region)
+    return create_aws_client("s3")
 
 
 def _utcnow():
@@ -301,24 +301,31 @@ class Query:
 
             playback = None
             hls_path = f"videos/hls/{video.id}/master.m3u8"
-            if settings.s3_bucket and settings.cloudfront_domain:
+            asset_available = False
+            if is_local_storage():
+                asset_available = local_asset_exists(hls_path)
+            elif settings.s3_bucket:
                 try:
                     _get_s3_client().head_object(
                         Bucket=settings.s3_bucket,
                         Key=hls_path,
                     )
-                    playback = VideoPlayback(
-                        hls_url=f"https://{settings.cloudfront_domain}/{hls_path}",
-                        guest_mode=viewer is None,
-                        allowed_fraction=0.25,
-                        message=(
-                            "Please login or signup to continue watching after preview"
-                            if viewer is None
-                            else None
-                        ),
-                    )
-                except ClientError:
-                    playback = None
+                    asset_available = True
+                except Exception:
+                    asset_available = False
+
+            playback_url = build_video_play_url(video.id)
+            if asset_available and playback_url:
+                playback = VideoPlayback(
+                    hls_url=playback_url,
+                    guest_mode=viewer is None,
+                    allowed_fraction=0.25,
+                    message=(
+                        "Please login or signup to continue watching after preview"
+                        if viewer is None
+                        else None
+                    ),
+                )
 
             return VideoPageData(
                 id=video.id,

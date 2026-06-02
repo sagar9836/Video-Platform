@@ -1,8 +1,7 @@
-# app/utils/s3.py
-
-import boto3
 from botocore.client import Config
+
 from app.core.config import settings
+from app.utils.aws import create_aws_client
 
 _endpoint_url = (
     f"https://s3.{settings.aws_region}.amazonaws.com"
@@ -10,9 +9,8 @@ _endpoint_url = (
     else None
 )
 
-s3_client = boto3.client(
+s3_client = create_aws_client(
     "s3",
-    region_name=settings.aws_region,
     endpoint_url=_endpoint_url,
     config=Config(signature_version="s3v4"),
 )

@@ -105,11 +105,19 @@ async def consume():
         group_id="ffmpeg-worker",
         enable_auto_commit=False,
         max_poll_records=1,
+        max_poll_interval_ms=settings.kafka_max_poll_interval_ms,
+        session_timeout_ms=settings.kafka_session_timeout_ms,
+        heartbeat_interval_ms=settings.kafka_heartbeat_interval_ms,
         value_deserializer=lambda v: json.loads(v.decode()),
     )
 
     await consumer.start()
-    logger.info("🚀 FFmpeg consumer started")
+    logger.info(
+        "🚀 FFmpeg consumer started | max_poll_interval_ms=%s session_timeout_ms=%s heartbeat_interval_ms=%s",
+        settings.kafka_max_poll_interval_ms,
+        settings.kafka_session_timeout_ms,
+        settings.kafka_heartbeat_interval_ms,
+    )
 
     producer = await get_producer()
 

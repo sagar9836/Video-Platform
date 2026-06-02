@@ -4,8 +4,8 @@ import api from "./axios";
    VIDEO UPLOAD / PLAY
    ====================== */
 
-export const uploadVideo = async (formData) => {
-  const res = await api.post("/videos/upload-direct", formData);
+export const uploadVideo = async (formData, config = {}) => {
+  const res = await api.post("/videos/upload-direct", formData, config);
   return res.data;
 };
 

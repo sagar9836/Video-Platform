@@ -1,8 +1,10 @@
 import asyncio
 import logging
+import mimetypes
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
 from strawberry.fastapi import GraphQLRouter
 
 from app.core.config import settings
@@ -27,8 +29,12 @@ from app.routes import (
     videos,
     live_chat,
 )
+from app.services.storage import get_local_media_root, is_local_storage
 
 logger = logging.getLogger("app")
+
+mimetypes.add_type("application/vnd.apple.mpegurl", ".m3u8")
+mimetypes.add_type("video/MP2T", ".ts")
 
 app = FastAPI(
     title=settings.app_name,
@@ -48,6 +54,9 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+if is_local_storage():
+    app.mount("/media", StaticFiles(directory=get_local_media_root()), name="media")
 
 
 @app.on_event("startup")

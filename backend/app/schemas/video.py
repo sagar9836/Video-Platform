@@ -9,7 +9,8 @@ class VideoCreateRequest(BaseModel):
 
 class VideoUploadResponse(BaseModel):
     video_id: int
-    upload_url: str
+    upload_url: str | None = None
+    storage_backend: str = "s3"
 
 
 class VideoVisibilityUpdateRequest(BaseModel):

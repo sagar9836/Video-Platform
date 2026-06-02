@@ -65,13 +65,17 @@ class Settings(BaseModel):
     jwt_algorithm: str = "HS256"
     access_token_expire_minutes: int = 60
 
+    storage_backend: str = "local"
     aws_access_key_id: str | None = None
     aws_secret_access_key: str | None = None
+    aws_session_token: str | None = None
     aws_region: str | None = None
     s3_bucket: str | None = None
     cloudfront_domain: str | None = None
     cloudfront_key_pair_id: str | None = None
     cloudfront_private_key_path: str | None = None
+    local_media_root: str = (BACKEND_DIR / "media").as_posix()
+    media_base_url: str = "http://localhost:8000/media"
 
     kafka_bootstrap_servers: str = "kafka:9092"
 

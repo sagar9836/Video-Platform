@@ -4,9 +4,7 @@ import asyncio
 import uuid
 import logging
 
-import boto3
 from botocore.client import Config
-from botocore.exceptions import ClientError
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -24,15 +22,21 @@ from app.dependencies.auth import get_current_user
 from app.kafka.producer import send_event
 from app.kafka.topics import VIDEO_PROCESSING_STARTED, VIDEO_UPLOADED
 from app.redis.client import redis_client
+from app.services.storage import (
+    build_public_asset_url,
+    is_local_storage,
+    local_asset_exists,
+    save_upload_file_locally,
+)
 from app.services.video_assets import delete_video_assets
+from app.utils.aws import create_aws_client
 from app.utils.s3 import generate_presigned_upload_url
 
 router = APIRouter(prefix="/videos", tags=["Videos"])
 logger = logging.getLogger("video-api")
 
-s3 = boto3.client(
+s3 = create_aws_client(
     "s3",
-    region_name=settings.aws_region,
     config=Config(connect_timeout=30, read_timeout=900),
 )
 
@@ -67,10 +71,17 @@ async def _start_processing(video: Video):
 
 
 def _upload_file(file: UploadFile, key: str):
+    if is_local_storage():
+        save_upload_file_locally(file, key)
+        return
     s3.upload_fileobj(file.file, settings.s3_bucket, key)
 
 
 def _check_s3(key: str):
+    if is_local_storage():
+        if not local_asset_exists(key):
+            raise FileNotFoundError(f"Local asset missing: {key}")
+        return
     s3.head_object(Bucket=settings.s3_bucket, Key=key)
 
 
@@ -113,11 +124,14 @@ async def create_upload(
     await db.commit()
     await db.refresh(video)
 
-    upload_url = generate_presigned_upload_url(settings.s3_bucket, s3_key)
+    upload_url = None
+    if not is_local_storage():
+        upload_url = generate_presigned_upload_url(settings.s3_bucket, s3_key)
 
     return {
         "video_id": video.id,
         "upload_url": upload_url,
+        "storage_backend": "local" if is_local_storage() else "s3",
     }
 
 
@@ -168,6 +182,12 @@ async def upload_direct(
         await file.seek(0)
         await asyncio.to_thread(_upload_file, file, video.s3_key)
     except Exception:
+        logger.exception(
+            "Storage upload failed for bucket=%s key=%s video_id=%s",
+            settings.s3_bucket,
+            video.s3_key,
+            video.id,
+        )
         video.status = VideoStatus.FAILED
         await db.commit()
         raise HTTPException(500, "Upload failed")
@@ -222,6 +242,12 @@ async def complete_upload(
     try:
         await asyncio.to_thread(_check_s3, video.s3_key)
     except Exception:
+        logger.exception(
+            "Storage object verification failed for bucket=%s key=%s video_id=%s",
+            settings.s3_bucket,
+            video.s3_key,
+            video.id,
+        )
         raise HTTPException(400, "File not uploaded to S3")
 
     video.status = VideoStatus.PROCESSING
@@ -275,24 +301,33 @@ async def play(video_id: int, db: AsyncSession = Depends(get_db)):
         raise HTTPException(400, "Video not ready")
 
     path = f"videos/hls/{video.id}/master.m3u8"
+    if is_local_storage():
+        asset_ready = local_asset_exists(path)
+    else:
+        asset_ready = _check_s3_playable(path)
 
-    try:
-        s3.head_object(Bucket=settings.s3_bucket, Key=path)
-    except ClientError:
+    if not asset_ready:
         raise HTTPException(503, "Still processing")
 
     # 🔥 CACHE BUSTING
-    hls_url = f"https://{settings.cloudfront_domain}/{path}?v={video.id}"
-
-    thumbnail_url = (
-        f"https://{settings.cloudfront_domain}/videos/thumbnails/{video.id}/thumbnail.jpg?v={video.id}"
+    hls_url = build_public_asset_url(path)
+    thumbnail_url = build_public_asset_url(
+        f"videos/thumbnails/{video.id}/thumbnail.jpg"
     )
 
     return {
         "video_id": video.id,
-        "hls_url": hls_url,
-        "thumbnail_url": thumbnail_url,
+        "hls_url": f"{hls_url}?v={video.id}" if hls_url else None,
+        "thumbnail_url": f"{thumbnail_url}?v={video.id}" if thumbnail_url else None,
     }
+
+
+def _check_s3_playable(key: str) -> bool:
+    try:
+        s3.head_object(Bucket=settings.s3_bucket, Key=key)
+        return True
+    except Exception:
+        return False
 
 
 @router.patch("/{video_id}/visibility")

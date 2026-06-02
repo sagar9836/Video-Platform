@@ -1,16 +1,21 @@
-import boto3
 from botocore.client import Config
 
 from app.core.config import settings
 from app.models.video import Video
+from app.services.storage import (
+    build_public_asset_url,
+    delete_local_keys,
+    is_local_storage,
+    list_local_keys,
+)
+from app.utils.aws import create_aws_client
 
 S3_DELETE_BATCH_SIZE = 1000
 
 
 def _get_s3_client():
-    return boto3.client(
+    return create_aws_client(
         "s3",
-        region_name=settings.aws_region,
         config=Config(
             connect_timeout=30,
             read_timeout=15 * 60,
@@ -20,15 +25,13 @@ def _get_s3_client():
 
 
 def build_video_play_url(video_id: int) -> str | None:
-    if not settings.cloudfront_domain:
-        return None
-    return f"https://{settings.cloudfront_domain}/videos/hls/{video_id}/master.m3u8"
+    return build_public_asset_url(f"videos/hls/{video_id}/master.m3u8")
 
 
 def build_video_thumbnail_url(video: Video) -> str | None:
-    if not settings.cloudfront_domain or not video.thumbnail_key:
+    if not video.thumbnail_key:
         return None
-    return f"https://{settings.cloudfront_domain}/{video.thumbnail_key}"
+    return build_public_asset_url(video.thumbnail_key)
 
 
 def build_thumbnail_s3_key(video_id: int) -> str:
@@ -70,14 +73,20 @@ def _list_prefix_keys(bucket: str, prefix: str) -> list[str]:
 
 
 def delete_video_assets(video: Video) -> None:
-    if not settings.s3_bucket:
-        return
-
     keys_to_delete = set()
     if video.s3_key:
         keys_to_delete.add(video.s3_key)
     if video.thumbnail_key:
         keys_to_delete.add(video.thumbnail_key)
+
+    if is_local_storage():
+        hls_keys = list_local_keys(f"videos/hls/{video.id}/")
+        keys_to_delete.update(hls_keys)
+        delete_local_keys(sorted(keys_to_delete))
+        return
+
+    if not settings.s3_bucket:
+        return
 
     hls_keys = _list_prefix_keys(settings.s3_bucket, f"videos/hls/{video.id}/")
     keys_to_delete.update(hls_keys)

@@ -19,6 +19,35 @@ import {
   Typography,
 } from "@mui/material";
 
+const authFieldSx = {
+  "& .MuiInputLabel-root": {
+    color: "rgba(255,255,255,0.78)",
+  },
+  "& .MuiInputLabel-root.Mui-focused": {
+    color: "#f5b95a",
+  },
+  "& .MuiOutlinedInput-root": {
+    borderRadius: 3,
+    bgcolor: "rgba(255,255,255,0.06)",
+    color: "#fff",
+  },
+  "& .MuiOutlinedInput-input": {
+    color: "#fff",
+  },
+  "& .MuiOutlinedInput-notchedOutline": {
+    borderColor: "rgba(255,255,255,0.18)",
+  },
+  "& .MuiOutlinedInput-root:hover .MuiOutlinedInput-notchedOutline": {
+    borderColor: "rgba(255,255,255,0.34)",
+  },
+  "& .MuiOutlinedInput-root.Mui-focused .MuiOutlinedInput-notchedOutline": {
+    borderColor: "#f5b95a",
+  },
+  "& .MuiFormHelperText-root": {
+    color: "rgba(255,255,255,0.58)",
+  },
+};
+
 function Login() {
   const navigate = useNavigate();
   const { login } = useAuth();
@@ -134,16 +163,11 @@ function Login() {
               fullWidth
               label="Email"
               margin="normal"
+              sx={authFieldSx}
               value={email}
               onChange={(e) => {
                 setEmail(e.target.value);
                 setVerificationRequired(false);
-              }}
-              InputProps={{
-                sx: {
-                  borderRadius: 3,
-                  bgcolor: "rgba(255,255,255,0.04)",
-                },
               }}
             />
 
@@ -152,16 +176,11 @@ function Login() {
               label="Password"
               type="password"
               margin="normal"
+              sx={authFieldSx}
               value={password}
               onChange={(e) => {
                 setPassword(e.target.value);
                 setVerificationRequired(false);
-              }}
-              InputProps={{
-                sx: {
-                  borderRadius: 3,
-                  bgcolor: "rgba(255,255,255,0.04)",
-                },
               }}
             />
 
@@ -186,14 +205,9 @@ function Login() {
                 <TextField
                   fullWidth
                   label="Email verification code"
+                  sx={authFieldSx}
                   value={verificationCode}
                   onChange={(e) => setVerificationCode(e.target.value)}
-                  InputProps={{
-                    sx: {
-                      borderRadius: 3,
-                      bgcolor: "rgba(255,255,255,0.04)",
-                    },
-                  }}
                 />
                 <Stack direction={{ xs: "column", sm: "row" }} spacing={1}>
                   <Button
