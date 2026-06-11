@@ -4,6 +4,7 @@ This project currently supports two video storage modes:
 
 - `local`: stores video files under `backend/media` and serves them from `/media`.
 - `s3`: stores raw uploads, processed HLS files, and thumbnails in Amazon S3, then serves public playback URLs through CloudFront when `CLOUDFRONT_DOMAIN` is configured.
+- `hybrid`: stores files locally first, attempts to sync the same objects to S3, prefers CloudFront playback when available, and falls back to local `/media` playback when cloud assets are unavailable.
 
 Use this guide when you want cloud storage instead of the local `backend/media` setup.
 
@@ -56,6 +57,8 @@ STORAGE_BACKEND: ${STORAGE_BACKEND:-local}
 ```
 
 When `.env` contains `STORAGE_BACKEND=s3`, both services switch to S3 mode.
+
+When `.env` contains `STORAGE_BACKEND=hybrid`, both services use local and cloud storage together. The project keeps local storage as the reliable fallback and treats S3/CloudFront as the preferred cloud delivery path.
 
 ## S3 Bucket Setup
 
@@ -165,7 +168,7 @@ The project builds playback URLs as:
 
 ```text
 https://{CLOUDFRONT_DOMAIN}/videos/hls/{video_id}/master.m3u8
-https://{CLOUDFRONT_DOMAIN}/videos/thumbnails/{video_id}/thumbnail.jpg
+https://{CLO UDFRONT_DOMAIN}/videos/thumbnails/{video_id}/thumbnail.jpg
 ```
 
 If `CLOUDFRONT_DOMAIN` is empty, S3 mode will not produce a public playback URL from `build_public_asset_url`.

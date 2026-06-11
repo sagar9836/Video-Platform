@@ -18,6 +18,18 @@ def is_s3_storage() -> bool:
     return get_storage_backend() == "s3"
 
 
+def is_hybrid_storage() -> bool:
+    return get_storage_backend() == "hybrid"
+
+
+def uses_local_storage() -> bool:
+    return is_local_storage() or is_hybrid_storage()
+
+
+def uses_s3_storage() -> bool:
+    return is_s3_storage() or is_hybrid_storage()
+
+
 def get_local_media_root() -> Path:
     root = Path(settings.local_media_root).resolve()
     root.mkdir(parents=True, exist_ok=True)
@@ -34,6 +46,10 @@ def _local_asset_path(key: str) -> Path:
     if not path.is_relative_to(root):
         raise ValueError(f"Invalid storage key: {key}")
     return path
+
+
+def local_asset_path(key: str) -> Path:
+    return _local_asset_path(key)
 
 
 def local_asset_exists(key: str) -> bool:
@@ -85,10 +101,11 @@ def delete_local_keys(keys: list[str]) -> None:
 
 
 def build_public_asset_url(key: str) -> str | None:
-    if is_local_storage():
-        return f"{settings.media_base_url.rstrip('/')}/{key}"
-
     if settings.cloudfront_domain:
         return f"https://{settings.cloudfront_domain}/{key}"
 
-    return None
+    return build_local_asset_url(key)
+
+
+def build_local_asset_url(key: str) -> str:
+    return f"{settings.media_base_url.rstrip('/')}/{key}"

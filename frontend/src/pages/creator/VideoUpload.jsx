@@ -120,7 +120,7 @@ export default function VideoUpload() {
       // 🟡 STEP 2: Upload to storage
       setStage("uploading");
 
-      if (storage_backend === "local") {
+      if (storage_backend === "local" || storage_backend === "hybrid") {
         const formData = new FormData();
         formData.append("title", title);
         formData.append("description", description);

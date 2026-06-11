@@ -21,7 +21,14 @@ from app.models.subscription import Subscription
 from app.models.user import User, UserRole
 from app.models.video import Video, VideoStatus, VideoVisibility
 from app.models.video_analytics import VideoAnalytics
-from app.services.storage import is_local_storage, local_asset_exists
+from app.services.storage import (
+    build_local_asset_url,
+    build_public_asset_url,
+    is_hybrid_storage,
+    local_asset_exists,
+    uses_local_storage,
+    uses_s3_storage,
+)
 from app.services.video_assets import build_video_play_url, build_video_thumbnail_url
 from app.utils.aws import create_aws_client
 
@@ -50,6 +57,12 @@ def _optional_user_from_request(request: Request) -> dict | None:
         return None
 
     return decode_access_token(token)
+
+
+def _is_local_request(request: Request) -> bool:
+    forwarded_host = request.headers.get("host", "")
+    hostname = forwarded_host.split(":", 1)[0].lower()
+    return hostname in {"localhost", "127.0.0.1"}
 
 
 async def _subscription_state(
@@ -302,19 +315,30 @@ class Query:
             playback = None
             hls_path = f"videos/hls/{video.id}/master.m3u8"
             asset_available = False
-            if is_local_storage():
+            playback_url = None
+            prefer_local = is_hybrid_storage() and _is_local_request(request)
+
+            if prefer_local and uses_local_storage():
                 asset_available = local_asset_exists(hls_path)
-            elif settings.s3_bucket:
+                if asset_available:
+                    playback_url = build_local_asset_url(hls_path)
+
+            if not asset_available and uses_s3_storage() and settings.s3_bucket:
                 try:
                     _get_s3_client().head_object(
                         Bucket=settings.s3_bucket,
                         Key=hls_path,
                     )
                     asset_available = True
+                    playback_url = build_public_asset_url(hls_path)
                 except Exception:
                     asset_available = False
 
-            playback_url = build_video_play_url(video.id)
+            if not asset_available and uses_local_storage():
+                asset_available = local_asset_exists(hls_path)
+                if asset_available:
+                    playback_url = build_local_asset_url(hls_path)
+
             if asset_available and playback_url:
                 playback = VideoPlayback(
                     hls_url=playback_url,

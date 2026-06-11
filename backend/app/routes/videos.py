@@ -5,7 +5,7 @@ import uuid
 import logging
 
 from botocore.client import Config
-from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, UploadFile
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -23,10 +23,15 @@ from app.kafka.producer import send_event
 from app.kafka.topics import VIDEO_PROCESSING_STARTED, VIDEO_UPLOADED
 from app.redis.client import redis_client
 from app.services.storage import (
+    build_local_asset_url,
     build_public_asset_url,
-    is_local_storage,
+    get_storage_backend,
+    is_hybrid_storage,
+    local_asset_path,
     local_asset_exists,
     save_upload_file_locally,
+    uses_local_storage,
+    uses_s3_storage,
 )
 from app.services.video_assets import delete_video_assets
 from app.utils.aws import create_aws_client
@@ -71,18 +76,37 @@ async def _start_processing(video: Video):
 
 
 def _upload_file(file: UploadFile, key: str):
-    if is_local_storage():
+    if uses_local_storage():
         save_upload_file_locally(file, key)
-        return
-    s3.upload_fileobj(file.file, settings.s3_bucket, key)
+
+    if uses_s3_storage():
+        if is_hybrid_storage():
+            try:
+                s3.upload_file(str(local_asset_path(key)), settings.s3_bucket, key)
+            except Exception:
+                logger.exception(
+                    "Hybrid cloud sync failed for bucket=%s key=%s",
+                    settings.s3_bucket,
+                    key,
+                )
+            return
+
+        s3.upload_fileobj(file.file, settings.s3_bucket, key)
 
 
-def _check_s3(key: str):
-    if is_local_storage():
-        if not local_asset_exists(key):
-            raise FileNotFoundError(f"Local asset missing: {key}")
+def _check_storage(key: str):
+    if uses_s3_storage():
+        try:
+            s3.head_object(Bucket=settings.s3_bucket, Key=key)
+            return
+        except Exception:
+            if not uses_local_storage():
+                raise
+
+    if uses_local_storage() and local_asset_exists(key):
         return
-    s3.head_object(Bucket=settings.s3_bucket, Key=key)
+
+    raise FileNotFoundError(f"Stored asset missing: {key}")
 
 
 def _resolve_visibility(raw_visibility: str | None) -> VideoVisibility:
@@ -93,6 +117,12 @@ def _resolve_visibility(raw_visibility: str | None) -> VideoVisibility:
         return VideoVisibility(str(raw_visibility).upper())
     except ValueError as exc:
         raise HTTPException(400, "Invalid visibility") from exc
+
+
+def _is_local_request(request: Request) -> bool:
+    forwarded_host = request.headers.get("host", "")
+    hostname = forwarded_host.split(":", 1)[0].lower()
+    return hostname in {"localhost", "127.0.0.1"}
 
 
 # ======================================================
@@ -125,13 +155,13 @@ async def create_upload(
     await db.refresh(video)
 
     upload_url = None
-    if not is_local_storage():
+    if not uses_local_storage():
         upload_url = generate_presigned_upload_url(settings.s3_bucket, s3_key)
 
     return {
         "video_id": video.id,
         "upload_url": upload_url,
-        "storage_backend": "local" if is_local_storage() else "s3",
+        "storage_backend": get_storage_backend(),
     }
 
 
@@ -240,7 +270,7 @@ async def complete_upload(
         return {"message": "Already processing"}
 
     try:
-        await asyncio.to_thread(_check_s3, video.s3_key)
+        await asyncio.to_thread(_check_storage, video.s3_key)
     except Exception:
         logger.exception(
             "Storage object verification failed for bucket=%s key=%s video_id=%s",
@@ -248,7 +278,7 @@ async def complete_upload(
             video.s3_key,
             video.id,
         )
-        raise HTTPException(400, "File not uploaded to S3")
+        raise HTTPException(400, "File not uploaded")
 
     video.status = VideoStatus.PROCESSING
     await db.commit()
@@ -291,7 +321,11 @@ async def get_status(video_id: int, db: AsyncSession = Depends(get_db)):
 # ======================================================
 
 @router.get("/{video_id}/play")
-async def play(video_id: int, db: AsyncSession = Depends(get_db)):
+async def play(
+    video_id: int,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+):
     video = await db.get(Video, video_id)
 
     if not video:
@@ -301,19 +335,29 @@ async def play(video_id: int, db: AsyncSession = Depends(get_db)):
         raise HTTPException(400, "Video not ready")
 
     path = f"videos/hls/{video.id}/master.m3u8"
-    if is_local_storage():
-        asset_ready = local_asset_exists(path)
+    use_cloud_url = False
+    prefer_local = is_hybrid_storage() and _is_local_request(request)
+    if prefer_local and uses_local_storage() and local_asset_exists(path):
+        asset_ready = True
+    elif uses_s3_storage() and _check_s3_playable(path):
+        asset_ready = True
+        use_cloud_url = True
+    elif uses_local_storage() and local_asset_exists(path):
+        asset_ready = True
     else:
-        asset_ready = _check_s3_playable(path)
+        asset_ready = False
 
     if not asset_ready:
         raise HTTPException(503, "Still processing")
 
     # 🔥 CACHE BUSTING
-    hls_url = build_public_asset_url(path)
-    thumbnail_url = build_public_asset_url(
-        f"videos/thumbnails/{video.id}/thumbnail.jpg"
-    )
+    thumbnail_path = f"videos/thumbnails/{video.id}/thumbnail.jpg"
+    if use_cloud_url:
+        hls_url = build_public_asset_url(path)
+        thumbnail_url = build_public_asset_url(thumbnail_path)
+    else:
+        hls_url = build_local_asset_url(path)
+        thumbnail_url = build_local_asset_url(thumbnail_path)
 
     return {
         "video_id": video.id,

@@ -5,8 +5,9 @@ from app.models.video import Video
 from app.services.storage import (
     build_public_asset_url,
     delete_local_keys,
-    is_local_storage,
     list_local_keys,
+    uses_local_storage,
+    uses_s3_storage,
 )
 from app.utils.aws import create_aws_client
 
@@ -79,13 +80,12 @@ def delete_video_assets(video: Video) -> None:
     if video.thumbnail_key:
         keys_to_delete.add(video.thumbnail_key)
 
-    if is_local_storage():
+    if uses_local_storage():
         hls_keys = list_local_keys(f"videos/hls/{video.id}/")
         keys_to_delete.update(hls_keys)
         delete_local_keys(sorted(keys_to_delete))
-        return
 
-    if not settings.s3_bucket:
+    if not uses_s3_storage() or not settings.s3_bucket:
         return
 
     hls_keys = _list_prefix_keys(settings.s3_bucket, f"videos/hls/{video.id}/")

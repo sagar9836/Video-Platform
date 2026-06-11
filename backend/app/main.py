@@ -29,7 +29,7 @@ from app.routes import (
     videos,
     live_chat,
 )
-from app.services.storage import get_local_media_root, is_local_storage
+from app.services.storage import get_local_media_root, uses_local_storage
 
 logger = logging.getLogger("app")
 
@@ -55,7 +55,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-if is_local_storage():
+if uses_local_storage():
     app.mount("/media", StaticFiles(directory=get_local_media_root()), name="media")
 
 

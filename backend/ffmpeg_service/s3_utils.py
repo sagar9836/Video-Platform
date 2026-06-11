@@ -22,6 +22,22 @@ def _is_local_storage() -> bool:
     return _storage_backend() == "local"
 
 
+def _is_s3_storage() -> bool:
+    return _storage_backend() == "s3"
+
+
+def _is_hybrid_storage() -> bool:
+    return _storage_backend() == "hybrid"
+
+
+def _uses_local_storage() -> bool:
+    return _is_local_storage() or _is_hybrid_storage()
+
+
+def _uses_s3_storage() -> bool:
+    return _is_s3_storage() or _is_hybrid_storage()
+
+
 def _local_media_root() -> Path:
     root = Path(settings.local_media_root).resolve()
     root.mkdir(parents=True, exist_ok=True)
@@ -36,7 +52,7 @@ def _local_key_path(key: str) -> Path:
     return path
 
 
-if not _is_local_storage():
+if _uses_s3_storage():
     if not settings.aws_region:
         raise ValueError("AWS_REGION is missing")
 
@@ -45,7 +61,7 @@ if not _is_local_storage():
 
 
 def _build_s3_client():
-    if _is_local_storage():
+    if not _uses_s3_storage():
         return None
 
     client_kwargs = {
@@ -73,55 +89,48 @@ s3 = _build_s3_client()
 
 # ---------------- DOWNLOAD ----------------
 def download_from_s3(s3_key: str, local_path: str):
-    if _is_local_storage():
+    if _uses_local_storage():
         source = _local_key_path(s3_key)
-        if not source.exists():
-            raise FileNotFoundError(f"Local source file missing: {s3_key}")
+        if source.exists():
+            destination = Path(local_path)
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(source, destination)
+            return
 
-        destination = Path(local_path)
-        destination.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(source, destination)
-        return
+        if not _uses_s3_storage():
+            raise FileNotFoundError(f"Local source file missing: {s3_key}")
 
     s3.download_file(settings.s3_bucket, s3_key, local_path)
 
 
 # ---------------- SINGLE UPLOAD ----------------
 def _upload_file(local_path: str, s3_key: str, content_type: str, cache_control: str):
-    if _is_local_storage():
+    if _uses_local_storage():
         target = _local_key_path(s3_key)
         target.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(local_path, target)
-        return
 
-    s3.upload_file(
-        local_path,
-        settings.s3_bucket,
-        s3_key,
-        ExtraArgs={
-            "ContentType": content_type,
-            "CacheControl": cache_control,
-        },
-    )
+    if _uses_s3_storage():
+        try:
+            s3.upload_file(
+                local_path,
+                settings.s3_bucket,
+                s3_key,
+                ExtraArgs={
+                    "ContentType": content_type,
+                    "CacheControl": cache_control,
+                },
+            )
+        except Exception:
+            if not _is_hybrid_storage():
+                raise
 
 
 # ---------------- THUMBNAIL ----------------
 def upload_thumbnail_to_s3(video_id: int, thumbnail_path: str) -> str:
     s3_key = f"videos/thumbnails/{video_id}/thumbnail.jpg"
 
-    if _is_local_storage():
-        _upload_file(thumbnail_path, s3_key, "image/jpeg", "no-cache")
-        return s3_key
-
-    s3.upload_file(
-        thumbnail_path,
-        settings.s3_bucket,
-        s3_key,
-        ExtraArgs={
-            "ContentType": "image/jpeg",
-            "CacheControl": "no-cache",
-        },
-    )
+    _upload_file(thumbnail_path, s3_key, "image/jpeg", "no-cache")
 
     return s3_key
 
