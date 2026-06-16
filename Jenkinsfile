@@ -2,7 +2,10 @@ pipeline {
     agent any
 
     environment {
-        IMAGE_NAME = "9836sagar9836/video-api"
+        BACKEND_IMAGE  = "9836sagar9836/video-api"
+        FRONTEND_IMAGE = "9836sagar9836/video-frontend"
+        FFMPEG_IMAGE   = "9836sagar9836/video-ffmpeg"
+
         TAG = "${BUILD_NUMBER}"
     }
 
@@ -15,15 +18,17 @@ pipeline {
             }
         }
 
-        stage('Build Docker Image') {
+        stage('Build Docker Images') {
             steps {
                 sh '''
-                docker build -t $IMAGE_NAME:$TAG ./backend
+                    docker build -t $BACKEND_IMAGE:$TAG ./backend
+                    docker build -t $FRONTEND_IMAGE:$TAG ./frontend
+                    docker build -t $FFMPEG_IMAGE:$TAG ./backend/ffmpeg_service
                 '''
             }
         }
 
-        stage('Push Docker Image') {
+        stage('Push Docker Images') {
             steps {
                 withCredentials([
                     usernamePassword(
@@ -33,8 +38,11 @@ pipeline {
                     )
                 ]) {
                     sh '''
-                    echo $DOCKER_PASS | docker login -u $DOCKER_USER --password-stdin
-                    docker push $IMAGE_NAME:$TAG
+                        echo $DOCKER_PASS | docker login -u $DOCKER_USER --password-stdin
+
+                        docker push $BACKEND_IMAGE:$TAG
+                        docker push $FRONTEND_IMAGE:$TAG
+                        docker push $FFMPEG_IMAGE:$TAG
                     '''
                 }
             }
@@ -46,11 +54,21 @@ pipeline {
                     file(credentialsId: 'kubeconfig', variable: 'KUBECONFIG')
                 ]) {
                     sh '''
-                    kubectl set image deployment/api \
-                    api=$IMAGE_NAME:$TAG \
-                    -n video-platform
+                        kubectl set image deployment/api \
+                        api=$BACKEND_IMAGE:$TAG \
+                        -n video-platform
 
-                    kubectl rollout status deployment/api -n video-platform
+                        kubectl set image deployment/frontend \
+                        frontend=$FRONTEND_IMAGE:$TAG \
+                        -n video-platform
+
+                        kubectl set image deployment/ffmpeg-worker \
+                        ffmpeg=$FFMPEG_IMAGE:$TAG \
+                        -n video-platform
+
+                        kubectl rollout status deployment/api -n video-platform
+                        kubectl rollout status deployment/frontend -n video-platform
+                        kubectl rollout status deployment/ffmpeg-worker -n video-platform
                     '''
                 }
             }
