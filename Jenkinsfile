@@ -1,5 +1,5 @@
 pipeline {
-    agent any
+    agent { label 'agent-1' }
 
     environment {
         BACKEND_IMAGE  = "9836sagar9836/video-api"
