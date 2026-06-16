@@ -68,7 +68,7 @@ pipeline {
 
                     kubectl rollout status deployment/api -n video-platform
                     kubectl rollout status deployment/frontend -n video-platform
-                    kubectl rollout status deployment/ffmpeg-worker -n video-platform
+                    kubectl rollout status deployment/ffmpeg -n video-platform
                     '''
                 }
             }
