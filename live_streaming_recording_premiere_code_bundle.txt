@@ -1,0 +1,5791 @@
+﻿LIVE STREAMING + RECORDING + PREMIERE CODE BUNDLE
+Generated: 2026-04-17 16:30:37 +05:30
+Workspace: F:\desktop\docker-Projects\Video-Platform
+
+Notes:
+- .env, backend/keys, binary media, node_modules, package-lock.json, and generated/cache files are intentionally omitted.
+- This bundle contains full source/config contents for files currently involved or referenced by live streaming, LiveKit recording, live chat/viewer presence, public live pages, and premiere setup UI/schema/model wiring.
+- Observed while bundling: frontend premiere API calls reference /live/premiere endpoints, but backend/app/routes/live.py currently does not define those routes.
+
+Included files:
+- docker-compose.yml
+- README.md
+- scripts/start-livekit.ps1
+- scripts/start-livekit-wsl.sh
+- infra/livekit/livekit.yaml
+- infra/livekit/livekit.runtime.yaml
+- infra/livekit/egress.yaml
+- backend/requirements.txt
+- backend/Dockerfile
+- backend/app/main.py
+- backend/app/core/config.py
+- backend/app/db/init_db.py
+- backend/app/routes/__init__.py
+- backend/app/routes/live.py
+- backend/app/routes/live_chat.py
+- backend/app/schemas/live.py
+- backend/app/models/__init__.py
+- backend/app/models/live_session.py
+- backend/app/models/premiere_session.py
+- backend/app/graphql/schema.py
+- backend/app/services/livekit_service.py
+- backend/app/services/live_chat.py
+- backend/app/services/live_presence.py
+- backend/app/services/video_assets.py
+- backend/app/kafka/topics.py
+- backend/app/kafka/producer.py
+- backend/app/kafka/notification_consumer.py
+- backend/ffmpeg_service/Dockerfile
+- backend/ffmpeg_service/requirements.txt
+- backend/ffmpeg_service/config.py
+- backend/ffmpeg_service/models.py
+- backend/ffmpeg_service/consumer.py
+- frontend/package.json
+- frontend/src/app/App.jsx
+- frontend/src/api/live.api.js
+- frontend/src/api/graphql.api.js
+- frontend/src/pages/creator/LiveControl.jsx
+- frontend/src/pages/creator/CreatorStudio.jsx
+- frontend/src/pages/live/LiveWatch.jsx
+- frontend/src/components/live/LiveStreamPlayer.jsx
+- frontend/src/components/live/LiveChatPanel.jsx
+- frontend/src/pages/channel/ChannelPage.jsx
+
+====================================================================================================
+FILE: docker-compose.yml
+====================================================================================================
+
+services:
+  frontend:
+    build:
+      context: ./frontend
+    container_name: video-platform-frontend
+    depends_on:
+      api:
+        condition: service_healthy
+    ports:
+      - "3000:80"
+    restart: unless-stopped
+    networks:
+      - video_platform_net
+
+  api:
+    build:
+      context: ./backend
+    container_name: video-platform-api
+    env_file:
+      - .env
+    environment:
+      DATABASE_URL: postgresql+asyncpg://postgres:postgres@postgres:5432/video_platform
+      KAFKA_BOOTSTRAP_SERVERS: kafka:29092
+      REDIS_URL: redis://redis:6379/0
+      LIVEKIT_URL: ws://livekit:7880
+      LIVEKIT_PUBLIC_URL: ws://localhost:7880
+    depends_on:
+      postgres:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+      redis:
+        condition: service_started
+      livekit:
+        condition: service_started
+    ports:
+      - "8000:8000"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 40s
+    restart: unless-stopped
+    networks:
+      - video_platform_net
+
+  ffmpeg:
+    build:
+      context: ./backend/ffmpeg_service
+    container_name: video-platform-ffmpeg
+    env_file:
+      - .env
+    environment:
+      DATABASE_URL: postgresql+asyncpg://postgres:postgres@postgres:5432/video_platform
+      KAFKA_BOOTSTRAP_SERVERS: kafka:29092
+      REDIS_URL: redis://redis:6379/0
+    volumes:
+      - recordings:/tmp   # 🔥 shared with egress
+    depends_on:
+      kafka:
+        condition: service_healthy
+    restart: unless-stopped
+    networks:
+      - video_platform_net
+
+  # ---------------- DATABASE ----------------
+  postgres:
+    image: postgres:15
+    container_name: video-platform-postgres
+    environment:
+      POSTGRES_DB: video_platform
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+    volumes:
+      - pg_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d video_platform"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+    networks:
+      - video_platform_net
+
+  # ---------------- REDIS ----------------
+  redis:
+    image: redis:7
+    container_name: video-platform-redis
+    restart: unless-stopped
+    networks:
+      - video_platform_net
+
+  # ---------------- ZOOKEEPER ----------------
+  zookeeper:
+    image: confluentinc/cp-zookeeper:7.5.0
+    container_name: video-platform-zookeeper
+    environment:
+      ZOOKEEPER_CLIENT_PORT: 2181
+    healthcheck:
+      test: ["CMD", "bash", "-c", "echo ruok | nc localhost 2181"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+    networks:
+      - video_platform_net
+
+  # ---------------- KAFKA ----------------
+  kafka:
+    image: confluentinc/cp-kafka:7.5.0
+    container_name: video-platform-kafka
+    depends_on:
+      zookeeper:
+        condition: service_healthy
+    environment:
+      KAFKA_BROKER_ID: 1
+      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
+
+      # ✅ stable listener config
+      KAFKA_LISTENERS: PLAINTEXT://0.0.0.0:29092
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:29092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
+
+    healthcheck:
+      test: ["CMD-SHELL", "cub kafka-ready -b localhost:29092 1 30"]
+      interval: 10s
+      timeout: 10s
+      retries: 10
+      start_period: 20s
+
+    restart: unless-stopped
+    networks:
+      - video_platform_net
+
+  # ---------------- LIVEKIT ----------------
+  livekit:
+    image: livekit/livekit-server
+    container_name: video-platform-livekit
+    command: --config /etc/livekit.yaml
+    volumes:
+      - ./infra/livekit/livekit.yaml:/etc/livekit.yaml
+    depends_on:
+      - redis
+    ports:
+      - "7880:7880"
+      - "7881:7881"
+      - "50000-50100:50000-50100/udp"
+    restart: unless-stopped
+    networks:
+      - video_platform_net
+
+  # ---------------- EGRESS (RECORDING) ----------------
+  livekit-egress:
+    image: livekit/egress
+    container_name: video-platform-egress
+    command: --config /etc/egress.yaml
+    environment:
+      LIVEKIT_API_KEY: devkey
+      LIVEKIT_API_SECRET: 1f221b798295dde71aa319ed2ca5b8615712d96e89fe5dc38c82f0333a6fe135
+      LIVEKIT_WS_URL: ws://livekit:7880
+      EGRESS_CONFIG_FILE: /etc/egress.yaml
+    volumes:
+      - ./infra/livekit/egress.yaml:/etc/egress.yaml
+      - recordings:/tmp   # 🔥 shared with ffmpeg
+    depends_on:
+      - livekit
+      - redis
+    restart: unless-stopped
+    networks:
+      - video_platform_net
+
+# ---------------- NETWORK ----------------
+networks:
+  video_platform_net:
+    driver: bridge
+
+# ---------------- VOLUMES ----------------
+volumes:
+  pg_data:
+  recordings:
+
+
+====================================================================================================
+FILE: README.md
+====================================================================================================
+
+# Video Streaming Platform
+
+Full-stack video platform with:
+- JWT authentication
+- creator onboarding and channel setup
+- direct video uploads and VOD processing
+- subscriptions, comments, analytics, and admin flows
+- browser-based live streaming over WebRTC with LiveKit
+
+## Stack
+
+### Backend
+- FastAPI app in [backend/app/main.py](/c:/Users/sagar/Desktop/docker/Video-Platform/backend/app/main.py)
+- async SQLAlchemy + PostgreSQL
+- Redis for short-lived live status and counters
+- Kafka + FFmpeg worker for VOD processing
+- Live session APIs in [backend/app/routes/live.py](/c:/Users/sagar/Desktop/docker/Video-Platform/backend/app/routes/live.py)
+
+### Frontend
+- React + Vite app in [frontend/src/app/App.jsx](/c:/Users/sagar/Desktop/docker/Video-Platform/frontend/src/app/App.jsx)
+- creator live studio in [frontend/src/pages/creator/LiveControl.jsx](/c:/Users/sagar/Desktop/docker/Video-Platform/frontend/src/pages/creator/LiveControl.jsx)
+- public live watch page in [frontend/src/pages/live/LiveWatch.jsx](/c:/Users/sagar/Desktop/docker/Video-Platform/frontend/src/pages/live/LiveWatch.jsx)
+
+### Infrastructure
+- Docker Compose stack in [docker-compose.yml](/c:/Users/sagar/Desktop/docker/Video-Platform/docker-compose.yml)
+- LiveKit base config in [infra/livekit/livekit.yaml](/c:/Users/sagar/Desktop/docker/Video-Platform/infra/livekit/livekit.yaml)
+- Windows LiveKit launcher in [scripts/start-livekit.ps1](/c:/Users/sagar/Desktop/docker/Video-Platform/scripts/start-livekit.ps1)
+- WSL LiveKit launcher in [scripts/start-livekit-wsl.sh](/c:/Users/sagar/Desktop/docker/Video-Platform/scripts/start-livekit-wsl.sh)
+
+## Live Streaming Flow
+
+The active live path is WebRTC-only.
+
+1. Creator opens `/creator/live`
+2. Browser gets camera and microphone permission
+3. Frontend creates or updates the live session with `POST /live/session`
+4. Frontend requests a publisher token with `POST /live/token/publisher`
+5. Creator joins the creator room in LiveKit and publishes local tracks
+6. Frontend marks the session live with `POST /live/session/start`
+7. Viewers open `/live/{creatorId}`
+8. Viewer page requests a viewer token with `POST /live/token/viewer`
+9. Viewers join the same LiveKit room and watch over WebRTC
+
+Live session state is stored in [backend/app/models/live_session.py](/c:/Users/sagar/Desktop/docker/Video-Platform/backend/app/models/live_session.py).
+
+## Main Live APIs
+
+- `POST /live/session`
+- `GET /live/session/me`
+- `POST /live/session/start`
+- `POST /live/session/end`
+- `POST /live/token/publisher`
+- `POST /live/token/viewer`
+- `GET /live/{creator_id}/room`
+- `GET /live/{creator_id}/status`
+
+## Run The Stack
+
+From the project root:
+
+```bash
+docker compose up --build
+```
+
+If Docker Hub is flaky and you hit errors like `TLS handshake timeout` while resolving base images,
+use the retrying helper script instead:
+
+Windows PowerShell:
+
+```powershell
+./scripts/docker-up.ps1
+```
+
+WSL / Linux:
+
+```bash
+chmod +x ./scripts/docker-up.sh
+./scripts/docker-up.sh
+```
+
+Those scripts pre-pull the required base images with retries, then run:
+- `docker compose build --pull=false`
+- `docker compose up -d --no-build`
+
+This avoids re-querying Docker Hub during every compose build when the images are already cached locally.
+
+Main URLs:
+- Frontend: `http://localhost:3000`
+- Backend API: `http://localhost:8000`
+- Health check: `http://localhost:8000/health`
+- LiveKit signaling: `ws://localhost:7880`
+
+Compose services:
+- `frontend`
+- `api`
+- `postgres`
+- `redis`
+- `zookeeper`
+- `kafka`
+- `ffmpeg`
+
+This now starts the React frontend and the backend stack together in Docker.
+The frontend runs through nginx on port `3000` and proxies API plus websocket chat traffic to the backend container.
+
+## LiveKit Setup
+
+LiveKit is intentionally run outside Docker for local development, especially on Windows, so WebRTC media ports do not go through Docker Desktop NAT.
+
+### Windows host
+
+If `livekit-server` is installed in Windows and available in `PATH`, run:
+
+```powershell
+./scripts/start-livekit.ps1
+```
+
+That script:
+- reads the default IPv4 route on Windows
+- writes a runtime config to `infra/livekit/livekit.runtime.yaml`
+- replaces `node_ip` with the machine's reachable IPv4 address
+- starts `livekit-server` with that runtime config
+
+### WSL
+
+If you run `livekit-server` inside WSL, use:
+
+```bash
+chmod +x ./scripts/start-livekit-wsl.sh
+./scripts/start-livekit-wsl.sh
+```
+
+Do not run `./scripts/start-livekit.ps1` directly from `bash`. It is a PowerShell script.
+
+The WSL launcher:
+- detects the current WSL IP
+- writes `infra/livekit/livekit.runtime.yaml`
+- starts `livekit-server` with the generated config
+
+## Test Live Streaming
+
+1. Start the Docker stack
+2. Start LiveKit with the correct launcher for your environment
+3. Log in as a creator
+4. Open `http://localhost:3000/creator/live`
+5. Click `Start preview` and allow camera and microphone
+6. Click `Go live`
+7. Open `http://localhost:3000/live/{creatorId}` in another tab or device
+
+## Stability Notes
+
+The current live client is tuned for longer sessions:
+- creator and viewer connections use LiveKit reconnect support
+- room connections are pre-warmed before joining
+- adaptive stream and dynacast are enabled
+- viewer pages retry when a creator comes online or reconnects
+- creator preview is kept alive during transient room failures so reconnecting is faster
+
+## Kafka And Docker Notes
+
+Kafka and ZooKeeper are configured for a single-broker local dev environment:
+- ZooKeeper has a readiness healthcheck
+- Kafka waits for ZooKeeper to be healthy
+- Kafka uses single-node-safe replication settings
+
+If startup order gets stuck, restart cleanly:
+
+```bash
+docker compose down
+docker compose up --build
+```
+
+Useful logs:
+
+```bash
+docker compose logs -f api
+docker compose logs -f kafka
+docker compose logs -f zookeeper
+```
+
+## Live Troubleshooting
+
+### Creator connects, then disconnects immediately
+
+If LiveKit logs show candidates like `127.0.0.1`, the server is advertising loopback instead of a reachable interface. Restart LiveKit with the provided Windows or WSL launcher so `node_ip` is rewritten into `infra/livekit/livekit.runtime.yaml`.
+
+### Viewer cannot watch from another machine
+
+If the app works only on the same PC, the browser may still be connecting to `localhost` or a private-only host. The backend and frontend already try to rewrite local LiveKit URLs to the current browser host, but the LiveKit server itself still must be reachable from that viewer.
+
+### Internet-wide viewing
+
+For true public streaming, LiveKit must be reachable on a public IP or domain, with the needed ports exposed correctly. Private LAN addresses like `172.x.x.x` only work inside the same local network scope.
+
+### WSL script error with `.ps1`
+
+If you see bash syntax errors from `start-livekit.ps1`, you ran the PowerShell script inside bash. Use `./scripts/start-livekit-wsl.sh` instead, or invoke PowerShell explicitly with `pwsh ./scripts/start-livekit.ps1`.
+
+## Notes
+
+- The older RTMP/nginx live flow has been removed from the active app path.
+- VOD processing still depends on Kafka + FFmpeg + S3/CloudFront.
+- Full runtime still depends on valid Docker, AWS, SMTP, and local network setup.
+
+
+====================================================================================================
+FILE: scripts/start-livekit.ps1
+====================================================================================================
+
+$ErrorActionPreference = "Stop"
+
+$repoRoot = Split-Path -Parent $PSScriptRoot
+$configPath = Join-Path $repoRoot "infra\livekit\livekit.yaml"
+$runtimeConfigPath = Join-Path $repoRoot "infra\livekit\livekit.runtime.yaml"
+
+if (-not (Test-Path $configPath)) {
+  Write-Error "LiveKit config not found at $configPath"
+}
+
+$command = Get-Command livekit-server -ErrorAction SilentlyContinue
+if (-not $command) {
+  Write-Host "LiveKit server binary was not found in PATH." -ForegroundColor Yellow
+  Write-Host "Install livekit-server on Windows, then run this script again." -ForegroundColor Yellow
+  Write-Host "Expected command: livekit-server --config `"$configPath`"" -ForegroundColor Cyan
+  exit 1
+}
+
+function Get-DefaultRouteIPv4 {
+  $routeOutput = route print -4
+  $candidates = @()
+
+  foreach ($line in $routeOutput) {
+    if ($line -match '^\s*0\.0\.0\.0\s+0\.0\.0\.0\s+(?<gateway>\S+)\s+(?<interface>\S+)\s+(?<metric>\d+)\s*$') {
+      $interfaceIp = $matches["interface"]
+      if ($interfaceIp -notlike "127.*" -and $interfaceIp -notlike "169.254.*") {
+        $candidates += [pscustomobject]@{
+          InterfaceIp = $interfaceIp
+          Metric = [int]$matches["metric"]
+        }
+      }
+    }
+  }
+
+  return $candidates |
+    Sort-Object Metric |
+    Select-Object -First 1 -ExpandProperty InterfaceIp
+}
+
+$hostIp = Get-DefaultRouteIPv4
+
+if (-not $hostIp) {
+  $hostIp = [System.Net.Dns]::GetHostAddresses([System.Net.Dns]::GetHostName()) |
+    Where-Object {
+      $_.AddressFamily -eq [System.Net.Sockets.AddressFamily]::InterNetwork -and
+      $_.IPAddressToString -notlike "127.*"
+    } |
+    Select-Object -First 1 -ExpandProperty IPAddressToString
+}
+
+if (-not $hostIp) {
+  Write-Error "Could not determine a reachable IPv4 address for this machine."
+}
+
+$content = Get-Content $configPath -Raw
+$runtimeContent = $content -replace 'node_ip:\s*"[^"]+"', "node_ip: `"$hostIp`""
+Set-Content -Path $runtimeConfigPath -Value $runtimeContent -Encoding UTF8
+
+Write-Host "Starting LiveKit with node IP: $hostIp" -ForegroundColor Green
+Write-Host "Runtime config: $runtimeConfigPath" -ForegroundColor Cyan
+& $command.Source --config $runtimeConfigPath
+
+
+====================================================================================================
+FILE: scripts/start-livekit-wsl.sh
+====================================================================================================
+
+#!/usr/bin/env bash
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+BASE_CONFIG="${REPO_ROOT}/infra/livekit/livekit.yaml"
+RUNTIME_CONFIG="${REPO_ROOT}/infra/livekit/livekit.runtime.yaml"
+
+if ! command -v livekit-server >/dev/null 2>&1; then
+  echo "livekit-server was not found in PATH." >&2
+  echo "Install livekit-server inside WSL, then run this script again." >&2
+  exit 1
+fi
+
+if [[ ! -f "${BASE_CONFIG}" ]]; then
+  echo "LiveKit base config not found at ${BASE_CONFIG}" >&2
+  exit 1
+fi
+
+WSL_IP="$(hostname -I | awk '{print $1}')"
+
+if [[ -z "${WSL_IP}" ]]; then
+  echo "Could not determine the WSL IP address." >&2
+  exit 1
+fi
+
+python3 - "${BASE_CONFIG}" "${RUNTIME_CONFIG}" "${WSL_IP}" <<'PY'
+from pathlib import Path
+import sys
+
+base_path = Path(sys.argv[1])
+runtime_path = Path(sys.argv[2])
+wsl_ip = sys.argv[3]
+
+content = base_path.read_text(encoding="utf-8")
+content = content.replace('node_ip: "127.0.0.1"', f'node_ip: "{wsl_ip}"')
+runtime_path.write_text(content, encoding="utf-8")
+PY
+
+echo "Starting LiveKit with WSL IP ${WSL_IP}"
+echo "Runtime config: ${RUNTIME_CONFIG}"
+exec livekit-server --config "${RUNTIME_CONFIG}"
+
+
+====================================================================================================
+FILE: infra/livekit/livekit.yaml
+====================================================================================================
+
+port: 7880
+
+bind_addresses:
+  - "0.0.0.0"
+
+rtc:
+  tcp_port: 7881
+  port_range_start: 50000
+  port_range_end: 50100
+  use_external_ip: false
+  node_ip: "127.0.0.1"
+
+redis:
+  address: redis:6379
+
+keys:
+  devkey: 1f221b798295dde71aa319ed2ca5b8615712d96e89fe5dc38c82f0333a6fe135
+
+room:
+  auto_create: true
+
+logging:
+  level: info
+
+
+====================================================================================================
+FILE: infra/livekit/livekit.runtime.yaml
+====================================================================================================
+
+port: 7880
+
+bind_addresses:
+  - "0.0.0.0"
+
+rtc:
+  tcp_port: 7881
+  port_range_start: 50000
+  port_range_end: 50100
+  use_external_ip: false
+  node_ip: "172.23.58.167"
+
+keys:
+  devkey: "862176abb6dc458c91563e072725c6ff"
+
+room:
+  auto_create: true
+
+logging:
+  level: info
+
+
+====================================================================================================
+FILE: infra/livekit/egress.yaml
+====================================================================================================
+
+log_level: info
+api_key: devkey
+api_secret: 1f221b798295dde71aa319ed2ca5b8615712d96e89fe5dc38c82f0333a6fe135
+ws_url: ws://livekit:7880
+insecure: true
+redis:
+  address: redis:6379
+
+
+====================================================================================================
+FILE: backend/requirements.txt
+====================================================================================================
+
+fastapi
+uvicorn[standard]
+sqlalchemy>=2.0
+aiosqlite
+pydantic
+pydantic[email]
+pydantic-settings
+python-jose[cryptography]
+passlib[bcrypt]
+aiokafka
+redis
+boto3
+python-multipart
+asyncpg==0.29.0
+httpx
+strawberry-graphql[fastapi]
+aiofiles
+jinja2
+livekit-api
+
+
+====================================================================================================
+FILE: backend/Dockerfile
+====================================================================================================
+
+ARG PYTHON_BASE_IMAGE=python:3.11-slim
+FROM ${PYTHON_BASE_IMAGE}
+
+ENV PYTHONDONTWRITEBYTECODE=1
+ENV PYTHONUNBUFFERED=1
+
+WORKDIR /app
+
+# system deps
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends build-essential && \
+    rm -rf /var/lib/apt/lists/*
+
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt && \
+    python -c "import multipart; print('python-multipart ok')"
+
+COPY app ./app
+RUN mkdir -p /app/keys
+COPY keys ./keys
+
+CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+
+
+====================================================================================================
+FILE: backend/app/main.py
+====================================================================================================
+
+import asyncio
+import logging
+
+from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
+from strawberry.fastapi import GraphQLRouter
+
+from app.core.config import settings
+from app.db.init_db import init_db
+from app.graphql.schema import schema
+from app.kafka.notification_consumer import start_notification_consumer
+from app.kafka.producer import close_kafka_producer
+from app.services.live_chat import start_live_chat_consumer
+from app.routes import (
+    admin,
+    admin_comments,
+    admin_reports,
+    admin_users,
+    admin_videos,
+    analytics,
+    auth,
+    comments,
+    creators,
+    live,
+    subscriptions,
+    users,
+    videos,
+    live_chat,
+)
+
+logger = logging.getLogger("app")
+
+app = FastAPI(
+    title=settings.app_name,
+    debug=settings.debug,
+)
+
+notification_consumer_task: asyncio.Task | None = None
+live_chat_consumer_task: asyncio.Task | None = None
+
+graphql_app = GraphQLRouter(schema)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+
+@app.on_event("startup")
+async def startup_event():
+    global notification_consumer_task, live_chat_consumer_task
+
+    logger.info("🚀 Starting application...")
+
+    await init_db()
+
+    # 🔥 Start Kafka consumers safely
+    try:
+        notification_consumer_task = asyncio.create_task(
+            start_notification_consumer()
+        )
+        live_chat_consumer_task = asyncio.create_task(
+            start_live_chat_consumer()
+        )
+
+        logger.info("✅ Background consumers started")
+
+    except Exception as e:
+        logger.exception("❌ Failed to start background consumers")
+
+
+@app.on_event("shutdown")
+async def shutdown_event():
+    global notification_consumer_task, live_chat_consumer_task
+
+    logger.info("🛑 Shutting down application...")
+
+    for task in [notification_consumer_task, live_chat_consumer_task]:
+        if task:
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+
+    await close_kafka_producer()
+
+    logger.info("✅ Shutdown complete")
+
+
+# ---------------- ROUTES ----------------
+
+app.include_router(auth.router)
+app.include_router(users.router)
+app.include_router(creators.router)
+app.include_router(videos.router)
+app.include_router(subscriptions.router)
+app.include_router(live.router)
+app.include_router(admin.router)
+app.include_router(analytics.router)
+app.include_router(comments.router)
+app.include_router(admin_comments.router)
+app.include_router(admin_users.router)
+app.include_router(admin_reports.router)
+app.include_router(admin_videos.router)
+app.include_router(graphql_app, prefix="/graphql")
+app.include_router(live_chat.router)
+
+
+# ---------------- HEALTH ----------------
+
+@app.get("/health", tags=["Health"])
+async def health_check():
+    return {"status": "ok"}
+
+
+====================================================================================================
+FILE: backend/app/core/config.py
+====================================================================================================
+
+import os
+from pathlib import Path
+from typing import Any, cast
+
+from pydantic import BaseModel
+
+
+BACKEND_DIR = Path(__file__).resolve().parents[2]
+ENV_FILE = BACKEND_DIR / ".env"
+DEFAULT_SQLITE_DB = (BACKEND_DIR / "video.db").as_posix()
+
+
+def _read_env_file(path: Path) -> dict[str, str]:
+    if not path.exists():
+        return {}
+
+    values: dict[str, str] = {}
+    for line in path.read_text(encoding="utf-8").splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#") or "=" not in stripped:
+            continue
+
+        key, value = stripped.split("=", 1)
+        values[key.strip()] = value.strip().strip('"').strip("'")
+
+    return values
+
+
+def _coerce_debug(value: object) -> bool:
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return False
+
+    normalized = str(value).strip().lower()
+    if normalized in {"1", "true", "yes", "on", "debug", "development", "dev"}:
+        return True
+    if normalized in {"0", "false", "no", "off", "release", "production", "prod"}:
+        return False
+    return bool(value)
+
+
+def _coerce_bool(value: object) -> bool:
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return False
+
+    normalized = str(value).strip().lower()
+    if normalized in {"1", "true", "yes", "on"}:
+        return True
+    if normalized in {"0", "false", "no", "off"}:
+        return False
+    return bool(value)
+
+
+class Settings(BaseModel):
+    app_name: str = "Video Streaming Platform"
+    debug: bool = False
+
+    database_url: str = f"sqlite+aiosqlite:///{DEFAULT_SQLITE_DB}"
+
+    jwt_secret: str = "dev-secret-key"
+    jwt_algorithm: str = "HS256"
+    access_token_expire_minutes: int = 60
+
+    aws_access_key_id: str | None = None
+    aws_secret_access_key: str | None = None
+    aws_region: str | None = None
+    s3_bucket: str | None = None
+    cloudfront_domain: str | None = None
+    cloudfront_key_pair_id: str | None = None
+    cloudfront_private_key_path: str | None = None
+
+    kafka_bootstrap_servers: str = "kafka:9092"
+
+    redis_host: str = "redis"
+    redis_port: int = 6379
+    redis_url: str = "redis://redis:6379/0"
+
+    smtp_host: str | None = None
+    smtp_port: int = 587
+    smtp_username: str | None = None
+    smtp_password: str | None = None
+    smtp_use_tls: bool = True
+    smtp_use_ssl: bool = False
+    email_from: str = "no-reply@videoplatform.local"
+
+    livekit_url: str = "ws://localhost:7880"
+    livekit_public_url: str = "ws://localhost:7880"
+    livekit_api_key: str = "devkey"
+    livekit_api_secret: str = "secret"
+
+    @classmethod
+    def from_env(cls) -> "Settings":
+        raw_values = _read_env_file(ENV_FILE)
+        raw_values.update(os.environ)
+
+        data: dict[str, Any] = {}
+        aliases = {
+            "smtp_host": ("SMTP_HOST", "MAIL_SERVER"),
+            "smtp_port": ("SMTP_PORT", "MAIL_PORT"),
+            "smtp_username": ("SMTP_USERNAME", "MAIL_USERNAME"),
+            "smtp_password": ("SMTP_PASSWORD", "MAIL_PASSWORD"),
+            "smtp_use_tls": ("SMTP_USE_TLS", "MAIL_STARTTLS"),
+            "smtp_use_ssl": ("SMTP_USE_SSL", "MAIL_SSL_TLS"),
+            "email_from": ("EMAIL_FROM", "MAIL_FROM"),
+        }
+        model_fields = cast(dict[str, Any], getattr(cls, "model_fields", {}))
+        field_names = tuple(model_fields.keys())
+        if not field_names:
+            legacy_fields = cast(dict[str, Any], getattr(cls, "__fields__", {}))
+            field_names = tuple(legacy_fields.keys())
+
+        for field_name in field_names:
+            env_name = field_name.upper()
+            if env_name in raw_values:
+                data[field_name] = raw_values[env_name]
+                continue
+
+            for alias in aliases.get(field_name, ()):
+                if alias in raw_values:
+                    data[field_name] = raw_values[alias]
+                    break
+
+        if "debug" in data:
+            data["debug"] = _coerce_debug(data["debug"])
+        if "smtp_use_tls" in data:
+            data["smtp_use_tls"] = _coerce_bool(data["smtp_use_tls"])
+        if "smtp_use_ssl" in data:
+            data["smtp_use_ssl"] = _coerce_bool(data["smtp_use_ssl"])
+
+        return cls.model_validate(data)
+
+settings = Settings.from_env()
+
+
+====================================================================================================
+FILE: backend/app/db/init_db.py
+====================================================================================================
+
+import asyncio
+from sqlalchemy import select, text
+
+from app.db.session import AsyncSessionLocal, get_engine
+from app.db.base import Base
+from app import models  # IMPORTANT: registers models
+
+from app.models.user import User, UserRole
+from app.core.security import hash_password
+
+
+# ----------------------------
+# CONFIG: BOOTSTRAP ADMIN
+# ----------------------------
+ADMIN_EMAIL = "admin@platform.com"
+ADMIN_PASSWORD = "admin123"
+
+
+async def create_tables():
+    async with get_engine().begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+        # Keep older local databases in sync when new columns are introduced.
+        await conn.execute(
+            text(
+                "ALTER TABLE videos "
+                "ADD COLUMN IF NOT EXISTS visibility VARCHAR(16) "
+                "NOT NULL DEFAULT 'PUBLIC'"
+            )
+        )
+        await conn.execute(
+            text(
+                "ALTER TABLE videos "
+                "ADD COLUMN IF NOT EXISTS thumbnail_key VARCHAR(512)"
+            )
+        )
+        await conn.execute(
+            text("UPDATE videos SET visibility = 'PUBLIC' WHERE visibility IS NULL")
+        )
+        await conn.execute(
+            text(
+                "ALTER TABLE users "
+                "ADD COLUMN IF NOT EXISTS is_active BOOLEAN "
+                "NOT NULL DEFAULT TRUE"
+            )
+        )
+        await conn.execute(
+            text("UPDATE users SET is_active = TRUE WHERE is_active IS NULL")
+        )
+        await conn.execute(
+            text(
+                "ALTER TABLE live_sessions "
+                "ADD COLUMN IF NOT EXISTS description VARCHAR(2000) "
+                "NOT NULL DEFAULT ''"
+            )
+        )
+        await conn.execute(
+            text(
+                "ALTER TABLE live_sessions "
+                "ADD COLUMN IF NOT EXISTS recording_enabled BOOLEAN "
+                "NOT NULL DEFAULT FALSE"
+            )
+        )
+        await conn.execute(
+            text("UPDATE live_sessions SET description = '' WHERE description IS NULL")
+        )
+        await conn.execute(
+            text(
+                "UPDATE live_sessions "
+                "SET recording_enabled = FALSE "
+                "WHERE recording_enabled IS NULL"
+            )
+        )
+
+
+async def create_bootstrap_admin():
+    async with AsyncSessionLocal() as db:
+        result = await db.execute(
+            select(User).where(User.email == ADMIN_EMAIL)
+        )
+        admin = result.scalar_one_or_none()
+
+        if admin:
+            print("✅ Bootstrap admin already exists")
+            return
+
+        admin = User(
+            email=ADMIN_EMAIL,
+            hashed_password=hash_password(ADMIN_PASSWORD),
+            role=UserRole.ADMIN,
+        )
+        db.add(admin)
+        await db.commit()
+
+        print("🚀 Bootstrap admin created")
+
+
+async def init_db():
+    await create_tables()
+    await create_bootstrap_admin()
+
+
+if __name__ == "__main__":
+    asyncio.run(init_db())
+
+
+====================================================================================================
+FILE: backend/app/routes/__init__.py
+====================================================================================================
+
+from . import (
+    admin,
+    admin_comments,
+    admin_reports,
+    admin_users,
+    admin_videos,
+    analytics,
+    auth,
+    comments,
+    creators,
+    live,
+    live_chat,
+    subscriptions,
+    users,
+    videos,
+)
+
+__all__ = [
+    "admin",
+    "admin_comments",
+    "admin_reports",
+    "admin_users",
+    "admin_videos",
+    "analytics",
+    "auth",
+    "comments",
+    "creators",
+    "live",
+    "live_chat",
+    "subscriptions",
+    "users",
+    "videos",
+]
+
+
+====================================================================================================
+FILE: backend/app/routes/live.py
+====================================================================================================
+
+import uuid
+import logging
+from datetime import datetime, timezone
+
+import httpx
+from fastapi import APIRouter, Depends, HTTPException
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.core.config import settings
+from app.db.session import get_db
+from app.dependencies.auth import get_current_user
+from app.models.creator import Creator
+from app.models.live_session import LiveSession, LiveSessionStatus
+from app.models.premiere_session import PremiereSession, PremiereSessionStatus
+from app.models.video import Video
+from app.schemas.live import LiveSessionUpsert, ViewerTokenRequest
+from app.services.livekit_service import create_egress_token, create_token
+from app.services.video_assets import build_video_play_url, build_video_thumbnail_url
+from app.kafka.producer import send_event
+from app.services.live_presence import get_count
+
+router = APIRouter(prefix="/live", tags=["Live"])
+logger = logging.getLogger(__name__)
+
+
+# ------------------------
+# Utils
+# ------------------------
+
+def _utcnow():
+    return datetime.now(timezone.utc)
+
+
+# ------------------------
+# LiveKit Egress (Recording)
+# ------------------------
+
+async def start_egress(room_name: str):
+    token = create_egress_token()
+
+    async with httpx.AsyncClient() as client:
+        try:
+            response = await client.post(
+                "http://livekit:7880/twirp/livekit.Egress/StartRoomCompositeEgress",
+                json={
+                    "room_name": room_name,
+                    "layout": "grid",
+                    "preset": "H264_720P_30",
+                    "file_outputs": [
+                        {
+                            "filepath": f"/tmp/{room_name}.mp4"
+                        }
+                    ]
+                },
+                headers={
+                    "Authorization": f"Bearer {token}",
+                    "Content-Type": "application/json",
+                },
+                timeout=10
+            )
+            response.raise_for_status()
+            return response.json()
+        except httpx.HTTPStatusError as e:
+            logger.exception("LiveKit egress rejected the recording request")
+            raise HTTPException(
+                502,
+                f"Egress failed: {e.response.text[:300]}",
+            ) from e
+        except Exception as e:
+            logger.exception("Unable to start LiveKit egress")
+            raise HTTPException(502, "Unable to start recording") from e
+
+
+# ------------------------
+# DB Helpers
+# ------------------------
+
+async def _get_creator(db: AsyncSession, user_id: int):
+    creator = await db.scalar(select(Creator).where(Creator.user_id == user_id))
+    if not creator:
+        raise HTTPException(403, "Creator access required")
+    return creator
+
+
+async def _get_active_live_session(db: AsyncSession, creator_id: int):
+    return await db.scalar(
+        select(LiveSession)
+        .where(
+            LiveSession.creator_id == creator_id,
+            LiveSession.status == LiveSessionStatus.LIVE
+        )
+        .order_by(LiveSession.id.desc())
+        .limit(1)
+    )
+
+
+async def _get_latest_live_session(db: AsyncSession, creator_id: int):
+    return await db.scalar(
+        select(LiveSession)
+        .where(LiveSession.creator_id == creator_id)
+        .order_by(LiveSession.id.desc())
+        .limit(1)
+    )
+
+
+def _serialize_session(session: LiveSession):
+    return {
+        "id": session.id,
+        "creator_id": session.creator_id,
+        "title": session.title,
+        "description": session.description,
+        "status": session.status.value,
+        "room_name": session.room_name,
+        "recording_enabled": session.recording_enabled,
+        "started_at": session.started_at.isoformat() if session.started_at else None,
+        "ended_at": session.ended_at.isoformat() if session.ended_at else None,
+        "created_at": session.created_at.isoformat() if session.created_at else None,
+    }
+
+
+# ------------------------
+# Routes
+# ------------------------
+
+@router.post("/session/start")
+async def start_live_session(
+    payload: LiveSessionUpsert,
+    user=Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    creator = await _get_creator(db, int(user["sub"]))
+    session = await _get_active_live_session(db, creator.id)
+
+    if session:
+        session.title = payload.title
+        session.description = payload.description
+        await db.commit()
+        await db.refresh(session)
+        return {"session": _serialize_session(session)}
+
+    session = LiveSession(
+        creator_id=creator.id,
+        title=payload.title,
+        description=payload.description,
+        room_name=f"live_{creator.id}_{uuid.uuid4().hex[:8]}",
+        status=LiveSessionStatus.LIVE,
+        started_at=_utcnow(),
+    )
+
+    db.add(session)
+    await db.commit()
+    await db.refresh(session)
+
+    return {"session": _serialize_session(session)}
+
+
+@router.get("/session/me")
+async def get_my_live_session(
+    user=Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    creator = await _get_creator(db, int(user["sub"]))
+    session = await _get_latest_live_session(db, creator.id)
+
+    return {"session": _serialize_session(session) if session else None}
+
+
+@router.post("/session")
+async def upsert_live_session(
+    payload: LiveSessionUpsert,
+    user=Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    creator = await _get_creator(db, int(user["sub"]))
+    session = await _get_latest_live_session(db, creator.id)
+
+    if session and session.status != LiveSessionStatus.ENDED:
+        session.title = payload.title
+        session.description = payload.description
+    else:
+        session = LiveSession(
+            creator_id=creator.id,
+            title=payload.title,
+            description=payload.description,
+            room_name=f"live_{creator.id}_{uuid.uuid4().hex[:8]}",
+            status=LiveSessionStatus.CREATED,
+        )
+        db.add(session)
+
+    await db.commit()
+    await db.refresh(session)
+
+    return {"session": _serialize_session(session)}
+
+
+@router.post("/session/recording/start")
+async def start_live_recording(
+    user=Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    creator = await _get_creator(db, int(user["sub"]))
+    session = await _get_active_live_session(db, creator.id)
+
+    if not session:
+        raise HTTPException(404, "No active live session")
+
+    if session.recording_enabled:
+        return {"session": _serialize_session(session), "recording": "already_started"}
+
+    egress = await start_egress(session.room_name)
+    session.recording_enabled = True
+
+    await db.commit()
+    await db.refresh(session)
+
+    return {
+        "session": _serialize_session(session),
+        "egress": egress,
+    }
+
+
+@router.post("/session/end")
+async def end_live_session(
+    user=Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    creator = await _get_creator(db, int(user["sub"]))
+    session = await _get_active_live_session(db, creator.id)
+
+    if not session:
+        raise HTTPException(404, "No active live session")
+
+    session.status = LiveSessionStatus.ENDED
+    session.ended_at = _utcnow()
+
+    await db.commit()
+
+    # 🔥 Trigger processing
+    await send_event("LIVE_ENDED", {
+        "room_name": session.room_name,
+        "creator_id": creator.id
+    })
+
+    return {"message": "Live ended", "session": _serialize_session(session)}
+
+
+@router.post("/token/publisher")
+async def publisher_token(user=Depends(get_current_user), db: AsyncSession = Depends(get_db)):
+    creator = await _get_creator(db, int(user["sub"]))
+    session = await _get_active_live_session(db, creator.id)
+
+    if not session:
+        raise HTTPException(400, "No live session")
+
+    token = create_token(f"creator_{creator.id}", session.room_name, True)
+
+    return {
+        "token": token,
+        "url": settings.livekit_public_url,
+        "room_name": session.room_name,
+        "session": _serialize_session(session),
+    }
+
+
+@router.post("/token/viewer")
+async def viewer_token(payload: ViewerTokenRequest, db: AsyncSession = Depends(get_db)):
+    session = await _get_active_live_session(db, payload.creator_id)
+
+    if not session:
+        raise HTTPException(404, "Creator not live")
+
+    token = create_token(
+        f"viewer_{uuid.uuid4().hex[:8]}",
+        session.room_name,
+        False,
+    )
+
+    return {
+        "token": token,
+        "url": settings.livekit_public_url,
+        "room_name": session.room_name,
+    }
+
+
+@router.get("/{creator_id}/status")
+async def status(creator_id: int, db: AsyncSession = Depends(get_db)):
+    session = await _get_active_live_session(db, creator_id)
+
+    if session:
+        return {
+            "mode": "live",
+            "room_name": session.room_name,
+            "title": session.title,
+            "description": session.description,
+            "session": _serialize_session(session),
+            "join_url": settings.livekit_public_url,
+        }
+
+    return {"mode": "offline"}
+
+
+@router.get("/viewers/{room_name}")
+async def viewers(room_name: str):
+    return {"count": await get_count(room_name)}
+
+
+====================================================================================================
+FILE: backend/app/routes/live_chat.py
+====================================================================================================
+
+import json
+from fastapi import APIRouter, WebSocket, WebSocketDisconnect
+
+from app.services.live_chat import connect, disconnect, publish_message
+
+router = APIRouter(prefix="/live/chat")
+
+
+@router.websocket("/{room_name}")
+async def chat_ws(websocket: WebSocket, room_name: str):
+    await connect(room_name, websocket)
+
+    try:
+        while True:
+            data = await websocket.receive_text()
+            payload = json.loads(data)
+
+            await publish_message(room_name, payload)
+
+    except WebSocketDisconnect:
+        disconnect(room_name, websocket)
+
+    except Exception:
+        disconnect(room_name, websocket)
+
+
+====================================================================================================
+FILE: backend/app/schemas/live.py
+====================================================================================================
+
+from datetime import datetime
+
+from pydantic import BaseModel, Field
+
+
+class LiveSessionUpsert(BaseModel):
+    title: str = Field(default="Live stream", max_length=160)
+    description: str = Field(default="", max_length=2000)
+    recording_enabled: bool = False
+
+
+class ViewerTokenRequest(BaseModel):
+    creator_id: int
+
+
+class PremiereScheduleRequest(BaseModel):
+    video_id: int
+    scheduled_start_at: datetime
+    title: str | None = Field(default=None, max_length=160)
+    description: str | None = Field(default=None, max_length=2000)
+
+
+====================================================================================================
+FILE: backend/app/models/__init__.py
+====================================================================================================
+
+from app.db.base import Base
+
+from .user import User
+from .creator import Creator
+from .creator_request import CreatorRequest
+from .comment import Comment
+from .analytics import VideoComment, VideoLike, VideoView
+from .notification import Notification
+from .live_session import LiveSession, LiveSessionStatus
+from .premiere_session import PremiereSession, PremiereSessionStatus
+from .video import Video, VideoVisibility
+from .subscription import Subscription
+from .video_analytics import VideoAnalytics
+
+__all__ = [
+    "Base",
+    "User",
+    "Creator",
+    "CreatorRequest",
+    "Video",
+    "VideoVisibility",
+    "Subscription",
+    "VideoAnalytics",
+    "VideoView",
+    "VideoLike",
+    "VideoComment",
+    "Comment",
+    "Notification",
+    "LiveSession",
+    "LiveSessionStatus",
+    "PremiereSession",
+    "PremiereSessionStatus",
+]
+
+
+====================================================================================================
+FILE: backend/app/models/live_session.py
+====================================================================================================
+
+import enum
+from datetime import datetime, timezone
+
+from sqlalchemy import Boolean, DateTime, Enum, ForeignKey, String
+from sqlalchemy.orm import Mapped, mapped_column
+
+from app.db.base import Base
+
+
+def _utcnow() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+class LiveSessionStatus(str, enum.Enum):
+    CREATED = "CREATED"
+    LIVE = "LIVE"
+    ENDED = "ENDED"
+
+
+class LiveSession(Base):
+    __tablename__ = "live_sessions"
+
+    id: Mapped[int] = mapped_column(primary_key=True, index=True)
+    creator_id: Mapped[int] = mapped_column(ForeignKey("creators.id"), index=True)
+    title: Mapped[str] = mapped_column(String(160), default="Live stream")
+    description: Mapped[str] = mapped_column(String(2000), default="")
+    status: Mapped[LiveSessionStatus] = mapped_column(
+        Enum(LiveSessionStatus, native_enum=False),
+        default=LiveSessionStatus.CREATED,
+        index=True,
+    )
+    room_name: Mapped[str] = mapped_column(String(160), unique=True)
+    recording_enabled: Mapped[bool] = mapped_column(Boolean, default=False)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    ended_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
+
+
+====================================================================================================
+FILE: backend/app/models/premiere_session.py
+====================================================================================================
+
+import enum
+from datetime import datetime, timezone
+
+from sqlalchemy import DateTime, Enum, ForeignKey, String
+from sqlalchemy.orm import Mapped, mapped_column, relationship
+
+from app.db.base import Base
+
+
+def _utcnow() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+class PremiereSessionStatus(str, enum.Enum):
+    SCHEDULED = "SCHEDULED"
+    LIVE = "LIVE"
+    ENDED = "ENDED"
+    CANCELLED = "CANCELLED"
+
+
+class PremiereSession(Base):
+    __tablename__ = "premiere_sessions"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    creator_id: Mapped[int] = mapped_column(ForeignKey("creators.id"), index=True)
+    video_id: Mapped[int] = mapped_column(ForeignKey("videos.id"), index=True)
+    title: Mapped[str] = mapped_column(String(160))
+    description: Mapped[str] = mapped_column(String(2000), default="")
+    scheduled_start_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    status: Mapped[PremiereSessionStatus] = mapped_column(
+        Enum(PremiereSessionStatus),
+        default=PremiereSessionStatus.SCHEDULED,
+        index=True,
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=_utcnow,
+    )
+    ended_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    creator = relationship("Creator")
+    video = relationship("Video")
+
+
+====================================================================================================
+FILE: backend/app/graphql/schema.py
+====================================================================================================
+
+from __future__ import annotations
+
+from typing import Optional, cast
+
+import boto3
+import strawberry
+from botocore.exceptions import ClientError
+from fastapi import HTTPException, Request
+from sqlalchemy import func, select
+from sqlalchemy.ext.asyncio import AsyncSession
+from strawberry.types import Info
+
+from app.core.config import settings
+from app.db.session import AsyncSessionLocal
+from app.dependencies.auth import decode_access_token
+from app.models.analytics import VideoLike
+from app.models.comment import Comment
+from app.models.creator import Creator
+from app.models.creator_request import CreatorRequest, CreatorRequestStatus
+from app.models.live_session import LiveSession, LiveSessionStatus
+from app.models.premiere_session import PremiereSession, PremiereSessionStatus
+from app.models.subscription import Subscription
+from app.models.user import User, UserRole
+from app.models.video import Video, VideoStatus, VideoVisibility
+from app.models.video_analytics import VideoAnalytics
+from app.services.video_assets import build_video_play_url, build_video_thumbnail_url
+
+
+def _get_s3_client():
+    return boto3.client("s3", region_name=settings.aws_region)
+
+
+def _utcnow():
+    from datetime import datetime, timezone
+
+    return datetime.now(timezone.utc)
+
+
+def _optional_user_from_request(request: Request) -> dict | None:
+    auth_header = request.headers.get("Authorization")
+    if not auth_header:
+        return None
+
+    try:
+        scheme, token = auth_header.split(" ", 1)
+    except ValueError:
+        return None
+
+    if scheme.lower() != "bearer" or not token:
+        return None
+
+    return decode_access_token(token)
+
+
+async def _subscription_state(
+    db: AsyncSession,
+    user_id: int | None,
+    creator_id: int,
+) -> bool:
+    if not user_id:
+        return False
+
+    result = await db.execute(
+        select(Subscription).where(
+            Subscription.user_id == user_id,
+            Subscription.creator_id == creator_id,
+        )
+    )
+    return result.scalar_one_or_none() is not None
+
+
+async def _creator_for_user_id(
+    db: AsyncSession,
+    user_id: int | None,
+) -> Creator | None:
+    if not user_id:
+        return None
+
+    result = await db.execute(select(Creator).where(Creator.user_id == user_id))
+    return result.scalar_one_or_none()
+
+
+@strawberry.type
+class CreatorSummary:
+    id: int
+    channel_name: str
+    description: str
+    subscribers_count: int
+    videos_count: int
+
+
+@strawberry.type
+class VideoCard:
+    id: int
+    title: str
+    description: str
+    creator_id: int
+    status: str
+    visibility: str
+    play_url: Optional[str] = None
+    thumbnail_url: Optional[str] = None
+
+
+@strawberry.type
+class VideoStats:
+    views: int
+    watch_count: int
+    likes: int
+    liked: bool
+
+
+@strawberry.type
+class VideoPlayback:
+    hls_url: Optional[str]
+    guest_mode: bool
+    allowed_fraction: float
+    message: Optional[str]
+
+
+@strawberry.type
+class ChannelPageData:
+    channel: CreatorSummary
+    videos: list[VideoCard]
+    is_live: bool
+    is_subscribed: bool
+
+
+@strawberry.type
+class VideoPageData:
+    id: int
+    title: str
+    description: str
+    creator: Optional[CreatorSummary]
+    stats: VideoStats
+    is_subscribed: bool
+    playback: Optional[VideoPlayback]
+
+
+@strawberry.type
+class CreatorStudioData:
+    creator: CreatorSummary
+    videos: list[VideoCard]
+    is_live: bool
+
+
+@strawberry.type
+class AdminDashboardData:
+    pending_creator_requests: int
+    total_users: int
+    total_videos: int
+    total_comments: int
+
+
+def _creator_summary(creator: Creator, videos_count: int) -> CreatorSummary:
+    return CreatorSummary(
+        id=creator.id,
+        channel_name=creator.channel_name,
+        description=creator.description,
+        subscribers_count=creator.subscribers_count,
+        videos_count=videos_count,
+    )
+
+
+def _video_card(video: Video) -> VideoCard:
+    play_url = build_video_play_url(video.id) if video.status == VideoStatus.READY else None
+
+    return VideoCard(
+        id=video.id,
+        title=video.title,
+        description=video.description,
+        creator_id=video.creator_id,
+        status=video.status.value,
+        visibility=video.visibility.value,
+        play_url=play_url,
+        thumbnail_url=build_video_thumbnail_url(video),
+    )
+
+
+def _premiere_is_live(premiere: PremiereSession | None) -> bool:
+    if not premiere:
+        return False
+
+    if premiere.status == PremiereSessionStatus.LIVE:
+        return True
+
+    return (
+        premiere.status == PremiereSessionStatus.SCHEDULED
+        and premiere.scheduled_start_at <= _utcnow()
+    )
+
+
+@strawberry.type
+class Query:
+    @strawberry.field
+    async def dashboard_feed(self) -> list[VideoCard]:
+        async with AsyncSessionLocal() as db:
+            result = await db.execute(
+                select(Video)
+                .where(
+                    Video.status == VideoStatus.READY,
+                    Video.visibility == VideoVisibility.PUBLIC,
+                )
+                .order_by(Video.id.desc())
+            )
+            videos = result.scalars().all()
+            return [_video_card(video) for video in videos]
+
+    @strawberry.field
+    async def channel_page(self, info: Info, creator_id: int) -> ChannelPageData:
+        request: Request = info.context["request"]
+        viewer = _optional_user_from_request(request)
+        viewer_id = int(viewer["sub"]) if viewer else None
+
+        async with AsyncSessionLocal() as db:
+            creator = await db.get(Creator, creator_id)
+            if not creator:
+                raise HTTPException(404, "Creator not found")
+
+            videos_result = await db.execute(
+                select(Video)
+                .where(
+                    Video.creator_id == creator_id,
+                    Video.status == VideoStatus.READY,
+                    Video.visibility == VideoVisibility.PUBLIC,
+                )
+                .order_by(Video.id.desc())
+            )
+            videos = videos_result.scalars().all()
+
+            is_subscribed = await _subscription_state(db, viewer_id, creator_id)
+            live_session = await db.scalar(
+                select(LiveSession)
+                .where(LiveSession.creator_id == creator_id)
+                .order_by(LiveSession.id.desc())
+                .limit(1)
+            )
+            premiere_session = await db.scalar(
+                select(PremiereSession)
+                .where(
+                    PremiereSession.creator_id == creator_id,
+                    PremiereSession.status.in_(
+                        [PremiereSessionStatus.SCHEDULED, PremiereSessionStatus.LIVE]
+                    ),
+                )
+                .order_by(PremiereSession.scheduled_start_at.desc(), PremiereSession.id.desc())
+                .limit(1)
+            )
+
+            return ChannelPageData(
+                channel=_creator_summary(creator, len(videos)),
+                videos=[_video_card(video) for video in videos],
+                is_live=bool(
+                    (live_session and live_session.status == LiveSessionStatus.LIVE)
+                    or _premiere_is_live(premiere_session)
+                ),
+                is_subscribed=is_subscribed,
+            )
+
+    @strawberry.field
+    async def video_page(self, info: Info, video_id: int) -> VideoPageData:
+        request: Request = info.context["request"]
+        viewer = _optional_user_from_request(request)
+        viewer_id = int(viewer["sub"]) if viewer else None
+
+        async with AsyncSessionLocal() as db:
+            video = await db.get(Video, video_id)
+            if not video or video.status != VideoStatus.READY:
+                raise HTTPException(404, "Video not found")
+
+            viewer_creator = await _creator_for_user_id(db, viewer_id)
+            can_view_private_video = bool(
+                viewer_creator and viewer_creator.id == video.creator_id
+            )
+            if video.visibility == VideoVisibility.PRIVATE and not can_view_private_video:
+                raise HTTPException(404, "Video not found")
+
+            creator = await db.get(Creator, video.creator_id)
+            videos_count_result = await db.execute(
+                select(func.count(Video.id))
+                .where(
+                    Video.creator_id == video.creator_id,
+                    Video.status == VideoStatus.READY,
+                    Video.visibility == VideoVisibility.PUBLIC,
+                )
+            )
+            videos_count = cast(int, videos_count_result.scalar_one())
+
+            analytics = await db.get(VideoAnalytics, video_id)
+            like_result = None
+            if viewer_id:
+                like_result = await db.execute(
+                    select(VideoLike).where(
+                        VideoLike.video_id == video_id,
+                        VideoLike.user_id == viewer_id,
+                    )
+                )
+
+            is_subscribed = False
+            if creator:
+                is_subscribed = await _subscription_state(db, viewer_id, creator.id)
+
+            playback = None
+            hls_path = f"videos/hls/{video.id}/master.m3u8"
+            if settings.s3_bucket and settings.cloudfront_domain:
+                try:
+                    _get_s3_client().head_object(
+                        Bucket=settings.s3_bucket,
+                        Key=hls_path,
+                    )
+                    playback = VideoPlayback(
+                        hls_url=f"https://{settings.cloudfront_domain}/{hls_path}",
+                        guest_mode=viewer is None,
+                        allowed_fraction=0.25,
+                        message=(
+                            "Please login or signup to continue watching after preview"
+                            if viewer is None
+                            else None
+                        ),
+                    )
+                except ClientError:
+                    playback = None
+
+            return VideoPageData(
+                id=video.id,
+                title=video.title,
+                description=video.description,
+                creator=_creator_summary(creator, videos_count) if creator else None,
+                stats=VideoStats(
+                    views=analytics.views if analytics else 0,
+                    watch_count=analytics.watch_count if analytics else 0,
+                    likes=analytics.likes if analytics else 0,
+                    liked=like_result.scalar_one_or_none() is not None if like_result else False,
+                ),
+                is_subscribed=is_subscribed,
+                playback=playback,
+            )
+
+    @strawberry.field
+    async def creator_studio(self, info: Info) -> Optional[CreatorStudioData]:
+        request: Request = info.context["request"]
+        viewer = _optional_user_from_request(request)
+        if not viewer or viewer.get("role") != UserRole.CREATOR.value:
+            return None
+
+        user_id = int(viewer["sub"])
+
+        async with AsyncSessionLocal() as db:
+            result = await db.execute(select(Creator).where(Creator.user_id == user_id))
+            creator = result.scalar_one_or_none()
+            if not creator:
+                return None
+
+            videos_result = await db.execute(
+                select(Video).where(Video.creator_id == creator.id).order_by(Video.id.desc())
+            )
+            videos = videos_result.scalars().all()
+            live_session = await db.scalar(
+                select(LiveSession)
+                .where(LiveSession.creator_id == creator.id)
+                .order_by(LiveSession.id.desc())
+                .limit(1)
+            )
+            premiere_session = await db.scalar(
+                select(PremiereSession)
+                .where(
+                    PremiereSession.creator_id == creator.id,
+                    PremiereSession.status.in_(
+                        [PremiereSessionStatus.SCHEDULED, PremiereSessionStatus.LIVE]
+                    ),
+                )
+                .order_by(PremiereSession.scheduled_start_at.desc(), PremiereSession.id.desc())
+                .limit(1)
+            )
+
+            return CreatorStudioData(
+                creator=_creator_summary(creator, len(videos)),
+                videos=[_video_card(video) for video in videos],
+                is_live=bool(
+                    (live_session and live_session.status == LiveSessionStatus.LIVE)
+                    or _premiere_is_live(premiere_session)
+                ),
+            )
+
+    @strawberry.field
+    async def admin_dashboard(self, info: Info) -> AdminDashboardData:
+        request: Request = info.context["request"]
+        viewer = _optional_user_from_request(request)
+        if not viewer or viewer.get("role") != UserRole.ADMIN.value:
+            raise HTTPException(403, "Admin access required")
+
+        async with AsyncSessionLocal() as db:
+            pending_requests = cast(
+                int,
+                (
+                    await db.scalar(
+                        select(func.count(cast(object, CreatorRequest.id)))
+                        .where(CreatorRequest.status == CreatorRequestStatus.PENDING)
+                    )
+                )
+                or 0,
+            )
+            total_users = cast(
+                int,
+                (await db.scalar(select(func.count(cast(object, User.id))))) or 0,
+            )
+            total_videos = cast(
+                int,
+                (await db.scalar(select(func.count(cast(object, Video.id))))) or 0,
+            )
+            total_comments = cast(
+                int,
+                (await db.scalar(select(func.count(cast(object, Comment.id))))) or 0,
+            )
+
+            return AdminDashboardData(
+                pending_creator_requests=pending_requests,
+                total_users=total_users,
+                total_videos=total_videos,
+                total_comments=total_comments,
+            )
+
+
+schema = strawberry.Schema(query=Query)
+
+
+====================================================================================================
+FILE: backend/app/services/livekit_service.py
+====================================================================================================
+
+from datetime import timedelta
+from livekit.api import AccessToken, VideoGrants
+
+from app.core.config import settings
+
+
+def create_token(identity: str, room: str, is_publisher: bool) -> str:
+    token = (
+        AccessToken(settings.livekit_api_key, settings.livekit_api_secret)
+        .with_identity(identity)
+        .with_grants(
+            VideoGrants(
+                room_join=True,
+                room=room,
+                can_publish=is_publisher,
+                can_subscribe=True,
+            )
+        )
+        .with_ttl(timedelta(hours=1))
+    )
+
+    return token.to_jwt()
+
+
+def create_egress_token() -> str:
+    token = (
+        AccessToken(settings.livekit_api_key, settings.livekit_api_secret)
+        .with_identity("egress-controller")
+        .with_grants(VideoGrants(room_record=True))
+        .with_ttl(timedelta(minutes=10))
+    )
+
+    return token.to_jwt()
+
+
+====================================================================================================
+FILE: backend/app/services/live_chat.py
+====================================================================================================
+
+import asyncio
+import json
+import logging
+import socket
+import uuid
+from collections import defaultdict, deque
+from datetime import datetime, timezone
+from typing import Any
+
+from aiokafka import AIOKafkaConsumer
+from fastapi import WebSocket
+
+from app.core.config import settings
+from app.kafka.producer import send_event
+from app.kafka.topics import LIVE_CHAT_MESSAGE
+from app.services.live_presence import increment, decrement
+
+logger = logging.getLogger("live-chat")
+
+MAX_MESSAGE_LENGTH = 400
+MAX_RECENT_MESSAGES = 50
+
+rooms: dict[str, set[WebSocket]] = defaultdict(set)
+recent_messages: dict[str, deque] = defaultdict(lambda: deque(maxlen=MAX_RECENT_MESSAGES))
+
+
+def _utcnow():
+    return datetime.now(timezone.utc)
+
+
+async def connect(room: str, websocket: WebSocket):
+    await websocket.accept()
+    rooms[room].add(websocket)
+
+    # ✅ presence
+    await increment(room)
+
+    # send chat history
+    await websocket.send_json({
+        "type": "chat.history",
+        "messages": list(recent_messages[room])
+    })
+
+
+def disconnect(room: str, websocket: WebSocket):
+    rooms[room].discard(websocket)
+
+    # ✅ presence
+    asyncio.create_task(decrement(room))
+
+    if not rooms[room]:
+        rooms.pop(room, None)
+
+
+async def publish_message(room: str, message: dict[str, Any]):
+    text = str(message.get("text", "")).strip()
+    if not text:
+        return
+
+    payload = {
+        "id": uuid.uuid4().hex,
+        "room_name": room,
+        "text": text[:MAX_MESSAGE_LENGTH],
+        "sent_at": _utcnow().isoformat(),
+    }
+
+    # send to Kafka
+    await send_event(LIVE_CHAT_MESSAGE, payload, key=room)
+
+
+async def _broadcast(payload: dict):
+    room = payload["room_name"]
+
+    recent_messages[room].append(payload)
+
+    for ws in list(rooms.get(room, [])):
+        try:
+            await ws.send_json({
+                "type": "chat.message",
+                "message": payload
+            })
+        except Exception:
+            disconnect(room, ws)
+
+
+async def start_live_chat_consumer():
+    consumer = AIOKafkaConsumer(
+        LIVE_CHAT_MESSAGE,
+        bootstrap_servers=settings.kafka_bootstrap_servers,
+        value_deserializer=lambda x: json.loads(x.decode()),
+        group_id=f"chat-{socket.gethostname()}-{uuid.uuid4().hex[:6]}",
+    )
+
+    await consumer.start()
+
+    try:
+        async for msg in consumer:
+            await _broadcast(msg.value)
+    finally:
+        await consumer.stop()
+
+
+====================================================================================================
+FILE: backend/app/services/live_presence.py
+====================================================================================================
+
+import redis.asyncio as redis
+from app.core.config import settings
+
+redis_client = redis.from_url(settings.redis_url, decode_responses=True)
+
+
+def key(room_name: str):
+    return f"live:viewers:{room_name}"
+
+
+async def increment(room_name: str):
+    return await redis_client.incr(key(room_name))
+
+
+async def decrement(room_name: str):
+    count = await redis_client.decr(key(room_name))
+    if count < 0:
+        await redis_client.set(key(room_name), 0)
+        return 0
+    return count
+
+
+async def get_count(room_name: str):
+    value = await redis_client.get(key(room_name))
+    return int(value or 0)
+
+
+====================================================================================================
+FILE: backend/app/services/video_assets.py
+====================================================================================================
+
+import boto3
+from botocore.client import Config
+
+from app.core.config import settings
+from app.models.video import Video
+
+S3_DELETE_BATCH_SIZE = 1000
+
+
+def _get_s3_client():
+    return boto3.client(
+        "s3",
+        region_name=settings.aws_region,
+        config=Config(
+            connect_timeout=30,
+            read_timeout=15 * 60,
+            retries={"max_attempts": 5, "mode": "standard"},
+        ),
+    )
+
+
+def build_video_play_url(video_id: int) -> str | None:
+    if not settings.cloudfront_domain:
+        return None
+    return f"https://{settings.cloudfront_domain}/videos/hls/{video_id}/master.m3u8"
+
+
+def build_video_thumbnail_url(video: Video) -> str | None:
+    if not settings.cloudfront_domain or not video.thumbnail_key:
+        return None
+    return f"https://{settings.cloudfront_domain}/{video.thumbnail_key}"
+
+
+def build_thumbnail_s3_key(video_id: int) -> str:
+    return f"videos/thumbnails/{video_id}/thumbnail.jpg"
+
+
+def _delete_keys(bucket: str, keys: list[str]) -> None:
+    if not keys:
+        return
+
+    s3 = _get_s3_client()
+    for index in range(0, len(keys), S3_DELETE_BATCH_SIZE):
+        batch = keys[index : index + S3_DELETE_BATCH_SIZE]
+        s3.delete_objects(
+            Bucket=bucket,
+            Delete={"Objects": [{"Key": key} for key in batch], "Quiet": True},
+        )
+
+
+def _list_prefix_keys(bucket: str, prefix: str) -> list[str]:
+    s3 = _get_s3_client()
+    keys: list[str] = []
+    continuation_token: str | None = None
+
+    while True:
+        params = {"Bucket": bucket, "Prefix": prefix}
+        if continuation_token:
+            params["ContinuationToken"] = continuation_token
+
+        response = s3.list_objects_v2(**params)
+        keys.extend(obj["Key"] for obj in response.get("Contents", []))
+
+        if not response.get("IsTruncated"):
+            break
+
+        continuation_token = response.get("NextContinuationToken")
+
+    return keys
+
+
+def delete_video_assets(video: Video) -> None:
+    if not settings.s3_bucket:
+        return
+
+    keys_to_delete = set()
+    if video.s3_key:
+        keys_to_delete.add(video.s3_key)
+    if video.thumbnail_key:
+        keys_to_delete.add(video.thumbnail_key)
+
+    hls_keys = _list_prefix_keys(settings.s3_bucket, f"videos/hls/{video.id}/")
+    keys_to_delete.update(hls_keys)
+
+    _delete_keys(settings.s3_bucket, sorted(keys_to_delete))
+
+
+====================================================================================================
+FILE: backend/app/kafka/topics.py
+====================================================================================================
+
+# app/kafka/topics.py
+
+# 🎬 Video pipeline
+VIDEO_PROCESSING_STARTED = "video.processing.started"
+VIDEO_READY = "video.ready"
+VIDEO_FAILED = "video.failed"
+VIDEO_UPLOADED = "video.uploaded"
+
+# 📡 Live streaming
+LIVE_STARTED = "live.started"
+LIVE_ENDED = "live.ended"
+LIVE_CHAT_MESSAGE = "live.chat.message"
+
+
+====================================================================================================
+FILE: backend/app/kafka/producer.py
+====================================================================================================
+
+# app/kafka/producer.py
+
+import json
+import logging
+import asyncio
+from typing import Optional
+
+from aiokafka import AIOKafkaProducer
+from app.core.config import settings
+
+logger = logging.getLogger("kafka-producer")
+
+_producer: Optional[AIOKafkaProducer] = None
+
+
+async def get_kafka_producer() -> AIOKafkaProducer:
+    global _producer
+
+    if _producer is not None:
+        return _producer
+
+    if not settings.kafka_bootstrap_servers:
+        raise RuntimeError("KAFKA_BOOTSTRAP_SERVERS is not set")
+
+    _producer = AIOKafkaProducer(
+        bootstrap_servers=settings.kafka_bootstrap_servers,
+        value_serializer=lambda v: json.dumps(v).encode("utf-8"),
+        acks="all",        # durability
+        linger_ms=5,       # batching
+        # ❌ retries removed (not supported in aiokafka)
+    )
+
+    await _producer.start()
+    logger.info("🚀 Kafka producer started")
+
+    return _producer
+
+
+# ---------------- SAFE SEND (WITH RETRY) ----------------
+async def send_event(topic: str, payload: dict, key: str | None = None):
+    producer = await get_kafka_producer()
+    encoded_key = key.encode("utf-8") if key else None
+
+    for attempt in range(3):  # manual retry
+        try:
+            await producer.send_and_wait(topic, payload, key=encoded_key)
+            logger.info(f"📤 Event sent | topic={topic} payload={payload}")
+            return
+
+        except Exception as e:
+            logger.warning(f"⚠️ Kafka send failed (attempt {attempt+1})")
+
+            if attempt == 2:
+                logger.exception("❌ Kafka send permanently failed")
+                raise
+
+            await asyncio.sleep(1)
+
+
+async def close_kafka_producer() -> None:
+    global _producer
+
+    if _producer is not None:
+        await _producer.stop()
+        _producer = None
+        logger.info("🛑 Kafka producer stopped")
+
+
+====================================================================================================
+FILE: backend/app/kafka/notification_consumer.py
+====================================================================================================
+
+# app/kafka/notification_consumer.py
+
+import json
+import logging
+import asyncio
+from typing import Any, cast
+
+from aiokafka import AIOKafkaConsumer
+from aiokafka.structs import ConsumerRecord
+
+from app.core.config import settings
+from app.db.session import AsyncSessionLocal
+from app.kafka.topics import (
+    LIVE_ENDED,
+    LIVE_STARTED,
+    VIDEO_FAILED,
+    VIDEO_READY,
+    VIDEO_UPLOADED,
+)
+from app.services.notification import notify_creator, notify_subscribers
+
+logger = logging.getLogger("notification-consumer")
+
+
+# ---------------- CONSUMER LOOP ----------------
+async def _consume_forever() -> None:
+    consumer = AIOKafkaConsumer(
+        VIDEO_READY,
+        VIDEO_UPLOADED,
+        LIVE_STARTED,
+        LIVE_ENDED,
+        VIDEO_FAILED,
+        bootstrap_servers=settings.kafka_bootstrap_servers,
+        value_deserializer=lambda v: json.loads(v.decode("utf-8")),
+        group_id="notification-group",
+        enable_auto_commit=True,
+    )
+
+    await consumer.start()
+    logger.info("🚀 Notification consumer started")
+
+    try:
+        async for raw_msg in consumer:
+            msg = cast(ConsumerRecord, raw_msg)
+            payload = msg.value
+
+            if not isinstance(payload, dict):
+                logger.warning(
+                    "⚠️ Invalid payload | topic=%s payload=%r",
+                    msg.topic,
+                    payload,
+                )
+                continue
+
+            await handle_event(msg.topic, payload)
+
+    finally:
+        await consumer.stop()
+
+
+# ---------------- RETRY LOOP ----------------
+async def start_notification_consumer() -> None:
+    while True:
+        try:
+            await _consume_forever()
+        except asyncio.CancelledError:
+            logger.info("🛑 Notification consumer stopped")
+            raise
+        except Exception:
+            logger.exception("❌ Consumer crashed, retrying in 5s")
+            await asyncio.sleep(5)
+
+
+# ---------------- EVENT HANDLER ----------------
+async def handle_event(topic: str, data: dict[str, Any]):
+    async with AsyncSessionLocal() as db:
+        creator_id = data.get("creator_id")
+
+        if not creator_id:
+            logger.warning(
+                "⚠️ Missing creator_id | topic=%s payload=%r",
+                topic,
+                data,
+            )
+            return
+
+        title = data.get("title", "Untitled Video")
+
+        try:
+            if topic == VIDEO_READY:
+                await notify_creator(
+                    creator_id=creator_id,
+                    message=f"🎉 Your video '{title}' is ready!",
+                )
+
+            elif topic == VIDEO_UPLOADED:
+                await notify_subscribers(
+                    creator_id=creator_id,
+                    message=f"📢 New video uploaded: {title}",
+                    db=db,
+                )
+
+            elif topic == LIVE_STARTED:
+                await notify_subscribers(
+                    creator_id=creator_id,
+                    message="🔴 Live stream started",
+                    db=db,
+                )
+
+            elif topic == LIVE_ENDED:
+                await notify_creator(
+                    creator_id=creator_id,
+                    message="📴 Your live stream has ended",
+                )
+
+            elif topic == VIDEO_FAILED:
+                await notify_creator(
+                    creator_id=creator_id,
+                    message=f"❌ Your video '{title}' failed to process",
+                )
+
+        except Exception:
+            logger.exception(
+                "❌ Failed handling event | topic=%s payload=%r",
+                topic,
+                data,
+            )
+
+
+====================================================================================================
+FILE: backend/ffmpeg_service/Dockerfile
+====================================================================================================
+
+ARG PYTHON_BASE_IMAGE=python:3.11-slim
+FROM ${PYTHON_BASE_IMAGE}
+
+RUN apt-get update && \
+    apt-get install -y ffmpeg && \
+    rm -rf /var/lib/apt/lists/*
+
+WORKDIR /worker
+
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+COPY . .
+
+CMD ["python", "consumer.py"]
+
+
+====================================================================================================
+FILE: backend/ffmpeg_service/requirements.txt
+====================================================================================================
+
+aiokafka==0.10.0
+redis==5.0.1
+boto3==1.34.34
+SQLAlchemy==2.0.25
+asyncpg==0.29.0
+aiofiles==23.2.1
+loguru==0.7.2
+pydantic-settings
+
+
+====================================================================================================
+FILE: backend/ffmpeg_service/config.py
+====================================================================================================
+
+# ffmpeg_service/config.py
+
+from pydantic_settings import BaseSettings
+
+
+class Settings(BaseSettings):
+    database_url: str
+    kafka_bootstrap_servers: str
+    s3_bucket: str
+    aws_region: str
+    redis_url: str
+
+    model_config = {
+        "case_sensitive": False,
+        "extra": "ignore",
+    }
+
+
+settings = Settings()
+
+
+====================================================================================================
+FILE: backend/ffmpeg_service/models.py
+====================================================================================================
+
+import enum
+from sqlalchemy import Column, Integer, String
+from sqlalchemy.orm import declarative_base
+
+Base = declarative_base()
+
+class VideoStatus(str, enum.Enum):
+    AWAITING_UPLOAD = "AWAITING_UPLOAD"
+    UPLOADED = "UPLOADED"
+    PROCESSING = "PROCESSING"
+    READY = "READY"
+    FAILED = "FAILED"
+
+class Video(Base):
+    __tablename__ = "videos"
+
+    id = Column(Integer, primary_key=True)
+    creator_id = Column(Integer, nullable=True)
+    status = Column(String(16), nullable=False)
+    thumbnail_key = Column(String, nullable=True)
+
+
+====================================================================================================
+FILE: backend/ffmpeg_service/consumer.py
+====================================================================================================
+
+# ffmpeg_service/consumer.py
+
+import asyncio
+import json
+import logging
+import os
+import subprocess
+
+from aiokafka import AIOKafkaConsumer, AIOKafkaProducer
+from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker
+from sqlalchemy import update
+
+import redis.asyncio as redis
+
+from config import settings
+from models import Video, VideoStatus
+from processor import process_video_pipeline
+
+# 🔥 EXISTING EVENTS
+VIDEO_PROCESSING_STARTED = "video.processing.started"
+VIDEO_READY = "video.ready"
+VIDEO_FAILED = "video.failed"
+
+# 🔥 NEW EVENT
+LIVE_ENDED = "LIVE_ENDED"
+
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger("ffmpeg-worker")
+
+redis_client = redis.from_url(settings.redis_url, decode_responses=True)
+
+engine = create_async_engine(settings.database_url, echo=False)
+AsyncSessionLocal = async_sessionmaker(engine, expire_on_commit=False)
+
+producer = None
+
+
+# ---------------- PRODUCER ----------------
+async def get_producer():
+    global producer
+    if producer:
+        return producer
+
+    producer = AIOKafkaProducer(
+        bootstrap_servers=settings.kafka_bootstrap_servers,
+        value_serializer=lambda v: json.dumps(v).encode(),
+    )
+    await producer.start()
+    return producer
+
+
+# ---------------- DB UPDATE ----------------
+async def update_status(video_id, status, thumbnail=None):
+    async with AsyncSessionLocal() as session:
+        values = {"status": status.value}
+        if thumbnail:
+            values["thumbnail_key"] = thumbnail
+
+        await session.execute(
+            update(Video).where(Video.id == video_id).values(**values)
+        )
+        await session.commit()
+
+
+# ---------------- REDIS ----------------
+async def set_redis(video_id, status, error=None):
+    await redis_client.set(f"video:{video_id}:status", status, ex=3600)
+    if error:
+        await redis_client.set(f"video:{video_id}:error", error[:300], ex=3600)
+
+
+# ---------------- LIVE → HLS ----------------
+async def process_live_recording(room_name: str):
+    input_file = f"/tmp/{room_name}.mp4"
+    output_dir = f"/tmp/hls/{room_name}"
+
+    if not os.path.exists(input_file):
+        logger.error(f"❌ Recording not found: {input_file}")
+        return
+
+    os.makedirs(output_dir, exist_ok=True)
+
+    logger.info(f"🎬 Converting LIVE → HLS | room={room_name}")
+
+    subprocess.run([
+        "ffmpeg",
+        "-i", input_file,
+        "-c", "copy",
+        "-start_number", "0",
+        "-hls_time", "4",
+        "-hls_list_size", "0",
+        "-f", "hls",
+        f"{output_dir}/index.m3u8"
+    ], check=True)
+
+    logger.info(f"✅ HLS ready | room={room_name}")
+
+
+# ---------------- CONSUMER ----------------
+async def consume():
+    consumer = AIOKafkaConsumer(
+        VIDEO_PROCESSING_STARTED,
+        LIVE_ENDED,  # 🔥 NEW
+        bootstrap_servers=settings.kafka_bootstrap_servers,
+        group_id="ffmpeg-worker",
+        enable_auto_commit=False,
+        max_poll_records=1,
+        value_deserializer=lambda v: json.loads(v.decode()),
+    )
+
+    await consumer.start()
+    logger.info("🚀 FFmpeg consumer started")
+
+    producer = await get_producer()
+
+    try:
+        async for msg in consumer:
+            topic = msg.topic
+            data = msg.value
+
+            # =========================
+            # 🎥 LIVE PROCESSING
+            # =========================
+            if topic == LIVE_ENDED:
+                room_name = data["room_name"]
+
+                logger.info(f"📡 LIVE ENDED received | room={room_name}")
+
+                try:
+                    await process_live_recording(room_name)
+                    await consumer.commit()
+                except Exception as e:
+                    logger.exception("❌ Live processing failed")
+                    await consumer.commit()
+
+                continue
+
+            # =========================
+            # 📦 VOD PROCESSING
+            # =========================
+            video_id = data["video_id"]
+            s3_key = data["s3_key"]
+            creator_id = data.get("creator_id")
+
+            logger.info(f"📩 VOD job | video_id={video_id}")
+
+            try:
+                thumbnail_key = await process_video_pipeline(video_id, s3_key)
+
+                await update_status(video_id, VideoStatus.READY, thumbnail_key)
+                await set_redis(video_id, "READY")
+
+                await producer.send_and_wait(
+                    VIDEO_READY,
+                    {
+                        "video_id": video_id,
+                        "creator_id": creator_id,
+                    },
+                )
+
+                logger.info(f"✅ Video READY | id={video_id}")
+
+                await consumer.commit()
+
+            except Exception as e:
+                logger.exception(f"❌ Processing failed | video_id={video_id}")
+
+                await update_status(video_id, VideoStatus.FAILED)
+                await set_redis(video_id, "FAILED", str(e))
+
+                await producer.send_and_wait(
+                    VIDEO_FAILED,
+                    {
+                        "video_id": video_id,
+                        "creator_id": creator_id,
+                    },
+                )
+
+                await consumer.commit()
+
+    finally:
+        await consumer.stop()
+
+
+if __name__ == "__main__":
+    asyncio.run(consume())
+
+
+====================================================================================================
+FILE: frontend/package.json
+====================================================================================================
+
+{
+  "name": "frontend",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "lint": "eslint .",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "@emotion/react": "^11.14.0",
+    "@emotion/styled": "^11.14.1",
+    "@mui/icons-material": "^7.3.7",
+    "@mui/material": "^7.3.7",
+    "@tanstack/react-query": "^5.90.16",
+    "axios": "^1.13.2",
+    "hls.js": "^1.6.15",
+    "livekit-client": "^2.15.4",
+    "react": "^19.2.0",
+    "react-dom": "^19.2.0",
+    "react-router-dom": "^7.12.0",
+    "video.js": "^8.23.4"
+  },
+  "devDependencies": {
+    "@eslint/js": "^9.39.1",
+    "@tailwindcss/vite": "^4.1.18",
+    "@types/react": "^19.2.5",
+    "@types/react-dom": "^19.2.3",
+    "@vitejs/plugin-react": "^5.1.1",
+    "autoprefixer": "^10.4.23",
+    "eslint": "^9.39.1",
+    "eslint-plugin-react-hooks": "^7.0.1",
+    "eslint-plugin-react-refresh": "^0.4.24",
+    "globals": "^16.5.0",
+    "postcss": "^8.5.6",
+    "tailwindcss": "^4.1.18",
+    "vite": "^7.2.4"
+  }
+}
+
+
+====================================================================================================
+FILE: frontend/src/app/App.jsx
+====================================================================================================
+
+import { BrowserRouter, Routes, Route, Navigate } from "react-router-dom";
+import { useAuth } from "../auth/AuthContext";
+import ProtectedRoute from "./ProtectedRoute";
+import PublicVideoRoute from "./PublicVideoRoute";
+
+/* PUBLIC */
+import Login from "../pages/Login";
+import Register from "../pages/Register";
+import ForgotPassword from "../pages/ForgotPassword";
+
+/* USER */
+import Dashboard from "../pages/Dashboard";
+import ApplyCreator from "../pages/ApplyCreator";
+
+/* CREATOR */
+import VideoUpload from "../pages/creator/VideoUpload";
+import CreatorStudio from "../pages/creator/CreatorStudio";
+import LiveControl from "../pages/creator/LiveControl";
+
+/* CHANNEL / VIDEO */
+import ChannelPage from "../pages/channel/ChannelPage";
+import VideoPlayer from "../pages/video/VideoPlayer";
+import LiveWatch from "../pages/live/LiveWatch";
+
+/* ADMIN */
+import AdminLayout from "../layouts/AdminLayout";
+import Comments from "../pages/admin/Comments";
+import CreatorRequests from "../pages/admin/CreatorRequests";
+import AdminDashboard from "../pages/admin/AdminDashboard";
+import Reports from "../pages/admin/Reports";
+import Users from "../pages/admin/Users";
+import Videos from "../pages/admin/Videos";
+
+function App() {
+  const { isAuthenticated } = useAuth();
+
+  return (
+    <BrowserRouter>
+      <Routes>
+        <Route path="/" element={<Dashboard />} />
+
+        {/* PUBLIC */}
+        <Route path="/login" element={<Login />} />
+        <Route path="/register" element={<Register />} />
+        <Route path="/forgot-password" element={<ForgotPassword />} />
+
+        {/* USER */}
+        <Route
+          path="/dashboard"
+          element={
+            <ProtectedRoute>
+              <Dashboard />
+            </ProtectedRoute>
+          }
+        />
+
+        <Route
+          path="/creator/apply"
+          element={
+            <ProtectedRoute>
+              <ApplyCreator />
+            </ProtectedRoute>
+          }
+        />
+
+        {/* CREATOR */}
+        <Route
+          path="/creator"
+          element={
+            <ProtectedRoute role="CREATOR">
+              <CreatorStudio />
+            </ProtectedRoute>
+          }
+        />
+
+        <Route
+          path="/creator/upload"
+          element={
+            <ProtectedRoute role="CREATOR">
+              <VideoUpload />
+            </ProtectedRoute>
+          }
+        />
+
+        <Route
+          path="/creator/live"
+          element={
+            <ProtectedRoute role="CREATOR">
+              <LiveControl />
+            </ProtectedRoute>
+          }
+        />
+
+        {/* PUBLIC CHANNEL */}
+        <Route
+          path="/channel/:creatorId"
+          element={<ChannelPage />}
+        />
+
+        {/* VIDEO */}
+        <Route
+          path="/video/:videoId"
+          element={
+            <PublicVideoRoute>
+              <VideoPlayer />
+            </PublicVideoRoute>
+          }
+        />
+        <Route
+          path="/live/:creatorId"
+          element={<LiveWatch />}
+        />
+
+        {/* ADMIN */}
+        <Route
+          path="/admin"
+          element={
+            <ProtectedRoute role="ADMIN">
+              <AdminLayout />
+            </ProtectedRoute>
+          }
+        >
+          <Route index element={<AdminDashboard />} />
+          <Route path="creator-requests" element={<CreatorRequests />} />
+          <Route path="users" element={<Users />} />
+          <Route path="videos" element={<Videos />} />
+          <Route path="comments" element={<Comments />} />
+          <Route path="reports" element={<Reports />} />
+        </Route>
+
+        {/* FALLBACK */}
+        <Route
+          path="*"
+          element={
+            isAuthenticated ? (
+              <Navigate to="/" />
+            ) : (
+              <Navigate to="/" />
+            )
+          }
+        />
+      </Routes>
+    </BrowserRouter>
+  );
+}
+
+export default App;
+
+
+====================================================================================================
+FILE: frontend/src/api/live.api.js
+====================================================================================================
+
+import api from "./axios";
+
+const LOCALHOST_HOSTS = new Set(["localhost", "127.0.0.1", "::1"]);
+
+const resolveBrowserLivekitUrl = (rawUrl) => {
+  if (!rawUrl || typeof window === "undefined") return rawUrl;
+
+  try {
+    const parsed = new URL(rawUrl);
+    const browserHost = window.location.hostname;
+
+    if (!LOCALHOST_HOSTS.has(parsed.hostname) || LOCALHOST_HOSTS.has(browserHost)) {
+      return rawUrl;
+    }
+
+    parsed.hostname = browserHost;
+
+    if (window.location.protocol === "https:" && parsed.protocol === "ws:") {
+      parsed.protocol = "wss:";
+    }
+
+    return parsed.toString();
+  } catch {
+    return rawUrl;
+  }
+};
+
+const normalize = (data) => {
+  if (!data) return data;
+
+  return {
+    ...data,
+    url: resolveBrowserLivekitUrl(data.url || data.livekit_url),
+  };
+};
+
+const normalizeSession = (session) => {
+  if (!session) return null;
+
+  return {
+    ...session,
+    roomName: session.room_name || session.roomName || "",
+    recordingEnabled:
+      session.recording_enabled ?? session.recordingEnabled ?? false,
+    startedAt: session.started_at || session.startedAt || null,
+    endedAt: session.ended_at || session.endedAt || null,
+    createdAt: session.created_at || session.createdAt || null,
+  };
+};
+
+const normalizePremiere = (premiere) => {
+  if (!premiere) return null;
+
+  return {
+    ...premiere,
+    videoId: premiere.video_id || premiere.videoId || null,
+    scheduledStartAt:
+      premiere.scheduled_start_at || premiere.scheduledStartAt || null,
+    playUrl: premiere.play_url || premiere.playUrl || null,
+    thumbnailUrl: premiere.thumbnail_url || premiere.thumbnailUrl || null,
+    initialOffsetSeconds:
+      premiere.initial_offset_seconds ?? premiere.initialOffsetSeconds ?? 0,
+  };
+};
+
+const normalizeStatus = (data) => {
+  if (!data) return data;
+
+  const session = normalizeSession(data.session);
+  const premiere = normalizePremiere(data.premiere);
+  const isLive = Boolean(data.is_live ?? data.isLive ?? data.live);
+
+  return {
+    ...data,
+    isLive,
+    live: isLive,
+    roomName: data.room_name || data.roomName || session?.roomName || "",
+    playUrl: data.play_url || data.playUrl || premiere?.playUrl || null,
+    scheduledStartAt:
+      data.scheduled_start_at || data.scheduledStartAt || premiere?.scheduledStartAt || null,
+    initialOffsetSeconds:
+      data.initial_offset_seconds ??
+      data.initialOffsetSeconds ??
+      premiere?.initialOffsetSeconds ??
+      0,
+    session,
+    premiere,
+  };
+};
+
+// ----------------------
+// LIVE STATUS
+// ----------------------
+export const fetchLiveRoom = async (creatorId) => {
+  const res = await api.get(`/live/${creatorId}/status`);
+  return normalizeStatus(res.data);
+};
+
+// ----------------------
+// TOKENS (FIXED)
+// ----------------------
+export const issueViewerToken = async (creatorId) => {
+  const res = await api.post("/live/token/viewer", {
+    creator_id: creatorId,
+  });
+
+  return {
+    ...normalize(res.data),
+    roomName: res.data.room_name || res.data.roomName || "",
+  };
+};
+
+export const issuePublisherToken = async () => {
+  const res = await api.post("/live/token/publisher");
+  return {
+    ...normalize(res.data),
+    roomName: res.data.room_name || res.data.roomName || "",
+    session: normalizeSession(res.data.session),
+  };
+};
+
+// ----------------------
+// SESSION
+// ----------------------
+export const fetchMyLiveSession = async () => {
+  const res = await api.get("/live/session/me");
+  return {
+    ...res.data,
+    session: normalizeSession(res.data.session),
+  };
+};
+
+export const createLiveSession = async (payload) => {
+  const res = await api.post("/live/session", payload);
+  return {
+    ...res.data,
+    session: normalizeSession(res.data.session),
+  };
+};
+
+export const startLiveSession = async (payload) => {
+  const res = await api.post("/live/session/start", payload);
+  return {
+    ...res.data,
+    session: normalizeSession(res.data.session),
+  };
+};
+
+export const startLiveRecording = async () => {
+  const res = await api.post("/live/session/recording/start");
+  return {
+    ...res.data,
+    session: normalizeSession(res.data.session),
+  };
+};
+
+export const endLiveSession = async () => {
+  const res = await api.post("/live/session/end");
+  return {
+    ...res.data,
+    session: normalizeSession(res.data.session),
+  };
+};
+
+// ----------------------
+// PREMIERE
+// ----------------------
+export const fetchMyPremiereSession = async () => {
+  const res = await api.get("/live/premiere/me");
+  return {
+    ...res.data,
+    premiere: normalizePremiere(res.data.premiere),
+  };
+};
+
+export const schedulePremiereSession = async (payload) => {
+  const res = await api.post("/live/premiere", payload);
+  return {
+    ...res.data,
+    premiere: normalizePremiere(res.data.premiere),
+  };
+};
+
+export const cancelPremiereSession = async (premiereId) => {
+  const res = await api.post(`/live/premiere/${premiereId}/cancel`);
+  return res.data;
+};
+
+export const endPremiereSession = async (premiereId) => {
+  const res = await api.post(`/live/premiere/${premiereId}/end`);
+  return res.data;
+};
+
+
+====================================================================================================
+FILE: frontend/src/api/graphql.api.js
+====================================================================================================
+
+import api from "./axios";
+
+const graphqlRequest = async (query, variables = {}) => {
+  const res = await api.post("/graphql", {
+    query,
+    variables,
+  });
+
+  if (res.data.errors?.length) {
+    throw new Error(res.data.errors[0]?.message || "GraphQL request failed");
+  }
+
+  return res.data.data;
+};
+
+export const fetchDashboardFeedGraphql = async () => {
+  const data = await graphqlRequest(`
+    query DashboardFeed {
+      dashboardFeed {
+        id
+        title
+        description
+        creatorId
+        status
+        visibility
+        playUrl
+        thumbnailUrl
+      }
+    }
+  `);
+
+  return data.dashboardFeed;
+};
+
+export const fetchChannelPageGraphql = async (creatorId) => {
+  const data = await graphqlRequest(
+    `
+      query ChannelPage($creatorId: Int!) {
+        channelPage(creatorId: $creatorId) {
+          isLive
+          isSubscribed
+          channel {
+            id
+            channelName
+            description
+            subscribersCount
+            videosCount
+          }
+          videos {
+            id
+            title
+            description
+            creatorId
+            status
+            visibility
+            playUrl
+            thumbnailUrl
+          }
+        }
+      }
+    `,
+    { creatorId: Number(creatorId) }
+  );
+
+  return data.channelPage;
+};
+
+export const fetchVideoPageGraphql = async (videoId) => {
+  const data = await graphqlRequest(
+    `
+      query VideoPage($videoId: Int!) {
+        videoPage(videoId: $videoId) {
+          id
+          title
+          description
+          isSubscribed
+          creator {
+            id
+            channelName
+            description
+            subscribersCount
+            videosCount
+          }
+          stats {
+            views
+            watchCount
+            likes
+            liked
+          }
+          playback {
+            hlsUrl
+            guestMode
+            allowedFraction
+            message
+          }
+        }
+      }
+    `,
+    { videoId: Number(videoId) }
+  );
+
+  return data.videoPage;
+};
+
+export const fetchCreatorStudioGraphql = async () => {
+  const data = await graphqlRequest(`
+    query CreatorStudio {
+      creatorStudio {
+        isLive
+        creator {
+          id
+          channelName
+          description
+          subscribersCount
+          videosCount
+        }
+        videos {
+          id
+          title
+          description
+          creatorId
+          status
+          visibility
+          playUrl
+          thumbnailUrl
+        }
+      }
+    }
+  `);
+
+  return data.creatorStudio;
+};
+
+export const fetchAdminDashboardGraphql = async () => {
+  const data = await graphqlRequest(`
+    query AdminDashboard {
+      adminDashboard {
+        pendingCreatorRequests
+        totalUsers
+        totalVideos
+        totalComments
+      }
+    }
+  `);
+
+  return data.adminDashboard;
+};
+
+
+====================================================================================================
+FILE: frontend/src/pages/creator/LiveControl.jsx
+====================================================================================================
+
+import { useEffect, useMemo, useRef, useState } from "react";
+import { Link } from "react-router-dom";
+import CameraswitchIcon from "@mui/icons-material/Cameraswitch";
+import ContentCopyIcon from "@mui/icons-material/ContentCopy";
+import LiveTvIcon from "@mui/icons-material/LiveTv";
+import StopCircleIcon from "@mui/icons-material/StopCircle";
+import VideocamIcon from "@mui/icons-material/Videocam";
+
+import {
+  Alert,
+  Box,
+  Button,
+  Card,
+  CardContent,
+  Chip,
+  CircularProgress,
+  Stack,
+  TextField,
+  Typography,
+} from "@mui/material";
+
+import {
+  endLiveSession,
+  fetchMyLiveSession,
+  issuePublisherToken,
+  startLiveRecording,
+  startLiveSession,
+} from "../../api/live.api";
+import { useAuth } from "../../auth/AuthContext";
+import LiveChatPanel from "../../components/live/LiveChatPanel";
+
+const LIVEKIT_CONNECT_OPTIONS = {
+  maxRetries: 3,
+  peerConnectionTimeout: 25000,
+  websocketTimeout: 25000,
+};
+const MAX_PUBLISHER_RECOVERY_ATTEMPTS = 5;
+
+export default function LiveControl() {
+  const { user } = useAuth();
+
+  const roomRef = useRef(null);
+  const localTracksRef = useRef([]);
+  const previewHostRef = useRef(null);
+  const reconnectTimeoutRef = useRef(null);
+  const reconnectAttemptsRef = useRef(0);
+  const stopRequestedRef = useRef(false);
+
+  const [loading, setLoading] = useState(true);
+  const [preparing, setPreparing] = useState(false);
+  const [publishing, setPublishing] = useState(false);
+  const [ending, setEnding] = useState(false);
+  const [copyState, setCopyState] = useState("");
+  const [error, setError] = useState("");
+  const [notice, setNotice] = useState("");
+  const [session, setSession] = useState(null);
+  const [title, setTitle] = useState(`${user?.creator?.channel_name || "Creator"} live`);
+  const [description, setDescription] = useState("");
+  const [previewReady, setPreviewReady] = useState(false);
+
+  const liveRoomUrl = useMemo(() => {
+    const creatorId = user?.creator?.id;
+    return creatorId ? `${window.location.origin}/live/${creatorId}` : "";
+  }, [user?.creator?.id]);
+
+  useEffect(() => {
+    let mounted = true;
+
+    const load = async () => {
+      try {
+        const data = await fetchMyLiveSession();
+        if (!mounted) {
+          return;
+        }
+        if (data?.session) {
+          setSession(data.session);
+          setTitle(data.session.title || `${user?.creator?.channel_name || "Creator"} live`);
+          setDescription(data.session.description || "");
+        }
+      } catch (err) {
+        if (mounted) {
+          setError(err?.response?.data?.detail || "Unable to load live studio.");
+        }
+      } finally {
+        if (mounted) {
+          setLoading(false);
+        }
+      }
+    };
+
+    load();
+
+    return () => {
+      mounted = false;
+      cleanupRoom();
+    };
+  }, []);
+
+  const disconnectRoom = () => {
+    if (roomRef.current) {
+      const activeRoom = roomRef.current;
+      roomRef.current = null;
+      activeRoom.disconnect();
+    }
+  };
+
+  const clearReconnectTimer = () => {
+    if (reconnectTimeoutRef.current) {
+      clearTimeout(reconnectTimeoutRef.current);
+      reconnectTimeoutRef.current = null;
+    }
+  };
+
+  const stopLocalPreview = () => {
+    localTracksRef.current.forEach((track) => {
+      try {
+        track.detach().forEach((element) => element.remove());
+      } catch {
+        // Ignore detach failures during teardown.
+      }
+      track.stop();
+    });
+    localTracksRef.current = [];
+
+    if (previewHostRef.current) {
+      previewHostRef.current.innerHTML = "";
+    }
+    setPreviewReady(false);
+  };
+
+  const cleanupRoom = () => {
+    clearReconnectTimer();
+    disconnectRoom();
+    stopLocalPreview();
+  };
+
+  const ensureLocalPreview = async () => {
+    if (localTracksRef.current.length > 0) {
+      return localTracksRef.current;
+    }
+
+    setPreparing(true);
+    setError("");
+
+    try {
+      const { createLocalTracks, Track, VideoPresets } = await import("livekit-client");
+      const tracks = await createLocalTracks({
+        audio: {
+          autoGainControl: true,
+          echoCancellation: true,
+          noiseSuppression: true,
+        },
+        video: {
+          resolution: VideoPresets.h720.resolution,
+        },
+      });
+
+      localTracksRef.current = tracks;
+
+      const videoTrack = tracks.find((track) => track.kind === Track.Kind.Video);
+      if (videoTrack && previewHostRef.current) {
+        previewHostRef.current.innerHTML = "";
+        const element = videoTrack.attach();
+        element.style.width = "100%";
+        element.style.height = "100%";
+        element.style.objectFit = "cover";
+        element.style.borderRadius = "24px";
+        previewHostRef.current.appendChild(element);
+      }
+
+      setPreviewReady(true);
+      setNotice("Camera and microphone are ready.");
+      return tracks;
+    } catch (err) {
+      setError(
+        err?.message ||
+          "The browser could not access your camera and microphone."
+      );
+      throw err;
+    } finally {
+      setPreparing(false);
+    }
+  };
+
+  const copyValue = async (label, value) => {
+    try {
+      await navigator.clipboard.writeText(value);
+      setCopyState(label);
+      setTimeout(() => setCopyState(""), 1500);
+    } catch {
+      setError(`Unable to copy ${label}.`);
+    }
+  };
+
+  const connectPublisherRoom = async (tracks, payload) => {
+    const { Room, RoomEvent, VideoPresets } = await import("livekit-client");
+    const tokenData = await issuePublisherToken();
+
+    disconnectRoom();
+    const room = new Room({
+      adaptiveStream: true,
+      dynacast: true,
+      disconnectOnPageLeave: false,
+      videoCaptureDefaults: {
+        resolution: VideoPresets.h720.resolution,
+      },
+      publishDefaults: {
+        simulcast: true,
+        dtx: true,
+        red: true,
+        stopMicTrackOnMute: false,
+        videoCodec: "vp8",
+        backupCodec: true,
+      },
+    });
+
+    room.on(RoomEvent.Reconnecting, () => {
+      setNotice("Connection is unstable. Reconnecting to the live room...");
+    });
+
+    room.on(RoomEvent.Reconnected, () => {
+      reconnectAttemptsRef.current = 0;
+      setNotice("Live room reconnected.");
+    });
+
+    room.on(RoomEvent.Disconnected, () => {
+      if (roomRef.current !== room) {
+        return;
+      }
+
+      roomRef.current = null;
+      if (stopRequestedRef.current) {
+        return;
+      }
+
+      setSession((prev) => (prev ? { ...prev, status: "STARTING" } : prev));
+      setError("");
+      const nextAttempt = reconnectAttemptsRef.current + 1;
+      reconnectAttemptsRef.current = nextAttempt;
+
+      if (nextAttempt > MAX_PUBLISHER_RECOVERY_ATTEMPTS) {
+        setError("The live room dropped and automatic recovery could not reconnect. Your preview is still ready.");
+        return;
+      }
+
+      const delay = Math.min(2000 * nextAttempt, 10000);
+      setNotice(`Live room disconnected. Retrying connection in ${Math.round(delay / 1000)}s...`);
+      clearReconnectTimer();
+      reconnectTimeoutRef.current = setTimeout(async () => {
+        try {
+          await connectPublisherRoom(localTracksRef.current, payload);
+          setSession((prev) => (prev ? { ...prev, status: "LIVE" } : prev));
+          setNotice("Live room recovered.");
+        } catch (err) {
+          setError(
+            err?.response?.data?.detail ||
+              err?.message ||
+              "Unable to recover the live room automatically."
+          );
+        }
+      }, delay);
+    });
+
+    room.prepareConnection(tokenData.url, tokenData.token);
+    await room.connect(tokenData.url, tokenData.token, LIVEKIT_CONNECT_OPTIONS);
+
+    for (const track of tracks) {
+      await room.localParticipant.publishTrack(track);
+    }
+
+    roomRef.current = room;
+    reconnectAttemptsRef.current = 0;
+    return tokenData;
+  };
+
+const goLive = async () => {
+  setPublishing(true);
+  setError("");
+  setNotice("");
+  stopRequestedRef.current = false;
+
+  try {
+    const payload = {
+      title: title.trim(),
+      description,
+      recording_enabled: true,
+    };
+
+    const sessionData = await startLiveSession(payload);
+    if (sessionData?.session) {
+      setSession(sessionData.session);
+    }
+
+    const tracks = await ensureLocalPreview();
+    await connectPublisherRoom(tracks, payload);
+
+    try {
+      const recordingData = await startLiveRecording();
+      setSession(recordingData.session || sessionData.session);
+      setNotice("You are live and recording.");
+    } catch (recordingErr) {
+      setSession(sessionData.session ? { ...sessionData.session, status: "LIVE" } : null);
+      setNotice("You are live, but recording could not be started.");
+      setError(
+        recordingErr?.response?.data?.detail ||
+          recordingErr?.message ||
+          "Recording could not be started."
+      );
+    }
+  } catch (err) {
+    setError(err?.response?.data?.detail || err?.message || "Failed to start live");
+  } finally {
+    setPublishing(false);
+  }
+};
+
+  const stopLive = async () => {
+    setEnding(true);
+    setError("");
+    stopRequestedRef.current = true;
+    clearReconnectTimer();
+
+    try {
+      await endLiveSession();
+      cleanupRoom();
+      setSession((prev) =>
+        prev
+          ? {
+              ...prev,
+              status: "ENDED",
+            }
+          : null
+      );
+      setNotice("The live session has ended.");
+    } catch (err) {
+      setError(err?.response?.data?.detail || "Unable to end the live session.");
+    } finally {
+      setEnding(false);
+    }
+  };
+
+  if (loading) {
+    return (
+      <Box sx={{ display: "flex", justifyContent: "center", mt: 8 }}>
+        <CircularProgress />
+      </Box>
+    );
+  }
+
+  const isLive = session?.status === "LIVE";
+
+  return (
+    <Box sx={{ maxWidth: 1280, mx: "auto", mt: 4, px: { xs: 2, md: 3 }, pb: 6 }}>
+      <Stack spacing={3}>
+        <Stack direction={{ xs: "column", xl: "row" }} spacing={3}>
+        <Card
+          sx={{
+            flex: 1.2,
+            borderRadius: 5,
+            overflow: "hidden",
+            background:
+              "linear-gradient(140deg, rgba(10,10,10,0.98), rgba(39,9,15,0.96) 55%, rgba(120,14,24,0.92))",
+            color: "#fff",
+            border: "1px solid rgba(255,255,255,0.08)",
+          }}
+        >
+          <CardContent sx={{ p: { xs: 3, md: 4 } }}>
+            <Stack spacing={2}>
+              <Stack direction="row" spacing={1} alignItems="center" flexWrap="wrap">
+                <Chip
+                  icon={<LiveTvIcon sx={{ color: "inherit !important" }} />}
+                  label={isLive ? "Live now" : "WebRTC Studio"}
+                  sx={{
+                    bgcolor: isLive ? "#ff0033" : "rgba(255,255,255,0.12)",
+                    color: "#fff",
+                    fontWeight: 800,
+                  }}
+                />
+                <Chip
+                  label={session?.room_name || `creator-${user?.creator?.id || "room"}`}
+                  sx={{
+                    bgcolor: "rgba(255,255,255,0.08)",
+                    color: "#fff",
+                    fontWeight: 700,
+                  }}
+                />
+              </Stack>
+
+              <Typography variant="h3" fontWeight={900} sx={{ letterSpacing: "-0.04em" }}>
+                Go live directly from your browser.
+              </Typography>
+
+              <Typography sx={{ color: "rgba(255,255,255,0.72)", maxWidth: 700 }}>
+                This studio is built around WebRTC, so you can preview locally, publish
+                faster, and send viewers into one stable live room directly from the browser.
+              </Typography>
+
+              {error && (
+                <Alert severity="error" sx={{ borderRadius: 3 }}>
+                  {error}
+                </Alert>
+              )}
+
+              {notice && (
+                <Alert severity="success" sx={{ borderRadius: 3 }}>
+                  {notice}
+                </Alert>
+              )}
+
+              <Box
+                sx={{
+                  position: "relative",
+                  minHeight: { xs: 260, md: 420 },
+                  borderRadius: 4,
+                  overflow: "hidden",
+                  bgcolor: "rgba(255,255,255,0.05)",
+                  border: "1px solid rgba(255,255,255,0.08)",
+                }}
+              >
+                <Box
+                  ref={previewHostRef}
+                  sx={{
+                    position: "absolute",
+                    inset: 0,
+                    display: previewReady ? "block" : "none",
+                  }}
+                />
+                {!previewReady && (
+                  <Stack
+                    sx={{
+                      position: "absolute",
+                      inset: 0,
+                      alignItems: "center",
+                      justifyContent: "center",
+                      textAlign: "center",
+                      px: 3,
+                    }}
+                    spacing={2}
+                  >
+                    <VideocamIcon sx={{ fontSize: 52, opacity: 0.8 }} />
+                    <Typography variant="h5" fontWeight={800}>
+                      Camera preview will appear here
+                    </Typography>
+                    <Typography sx={{ color: "rgba(255,255,255,0.68)", maxWidth: 560 }}>
+                      Start a local preview first so the browser can lock in your camera
+                      and microphone before you publish the room.
+                    </Typography>
+                  </Stack>
+                )}
+              </Box>
+
+              <Stack direction={{ xs: "column", sm: "row" }} spacing={1.5}>
+                <Button
+                  variant="outlined"
+                  startIcon={<CameraswitchIcon />}
+                  onClick={ensureLocalPreview}
+                  disabled={preparing || previewReady}
+                  sx={{
+                    borderRadius: 999,
+                    color: "#fff",
+                    borderColor: "rgba(255,255,255,0.24)",
+                  }}
+                >
+                  {preparing ? "Preparing..." : previewReady ? "Preview ready" : "Start preview"}
+                </Button>
+
+                <Button
+                  variant="contained"
+                  startIcon={<LiveTvIcon />}
+                  onClick={goLive}
+                  disabled={publishing || isLive}
+                  sx={{ borderRadius: 999, bgcolor: "#ff0033", "&:hover": { bgcolor: "#dc002c" } }}
+                >
+                  {publishing ? "Going live..." : isLive ? "Live now" : "Go live"}
+                </Button>
+
+                <Button
+                  variant="outlined"
+                  startIcon={<StopCircleIcon />}
+                  onClick={stopLive}
+                  disabled={ending || !isLive}
+                  sx={{
+                    borderRadius: 999,
+                    color: "#fff",
+                    borderColor: "rgba(255,255,255,0.24)",
+                  }}
+                >
+                  {ending ? "Ending..." : "End live"}
+                </Button>
+              </Stack>
+            </Stack>
+          </CardContent>
+        </Card>
+
+        <Card
+          sx={{
+            flex: 0.85,
+            borderRadius: 5,
+            bgcolor: "#101010",
+            color: "#fff",
+            border: "1px solid rgba(255,255,255,0.08)",
+          }}
+        >
+          <CardContent sx={{ p: { xs: 3, md: 4 } }}>
+            <Stack spacing={2.5}>
+              <Typography variant="h5" fontWeight={800}>
+                Stream details
+              </Typography>
+
+              <TextField
+                label="Live title"
+                value={title}
+                onChange={(event) => setTitle(event.target.value)}
+                fullWidth
+                InputLabelProps={{ shrink: true }}
+                sx={{
+                  "& .MuiOutlinedInput-root": {
+                    color: "#fff",
+                    borderRadius: 3,
+                  },
+                  "& .MuiInputLabel-root": { color: "rgba(255,255,255,0.65)" },
+                }}
+              />
+
+              <TextField
+                label="Description"
+                value={description}
+                onChange={(event) => setDescription(event.target.value)}
+                fullWidth
+                multiline
+                minRows={4}
+                InputLabelProps={{ shrink: true }}
+                sx={{
+                  "& .MuiOutlinedInput-root": {
+                    color: "#fff",
+                    borderRadius: 3,
+                  },
+                  "& .MuiInputLabel-root": { color: "rgba(255,255,255,0.65)" },
+                }}
+              />
+
+              <Box
+                sx={{
+                  p: 2,
+                  borderRadius: 3,
+                  bgcolor: "rgba(255,255,255,0.04)",
+                  border: "1px solid rgba(255,255,255,0.08)",
+                }}
+              >
+                <Typography sx={{ color: "rgba(255,255,255,0.58)", fontSize: 13 }}>
+                  Public live room
+                </Typography>
+                <Typography sx={{ mt: 0.8, wordBreak: "break-all", fontWeight: 700 }}>
+                  {liveRoomUrl || "Unavailable"}
+                </Typography>
+                {liveRoomUrl && (
+                  <Button
+                    size="small"
+                    startIcon={<ContentCopyIcon />}
+                    onClick={() => copyValue("live-room", liveRoomUrl)}
+                    sx={{ mt: 1, px: 0, color: copyState === "live-room" ? "#ff9aa7" : "#fff" }}
+                  >
+                    {copyState === "live-room" ? "Copied" : "Copy room link"}
+                  </Button>
+                )}
+              </Box>
+
+              <Box
+                sx={{
+                  p: 2,
+                  borderRadius: 3,
+                  bgcolor: "rgba(255,255,255,0.04)",
+                  border: "1px solid rgba(255,255,255,0.08)",
+                }}
+              >
+                <Typography sx={{ color: "rgba(255,255,255,0.58)", fontSize: 13 }}>
+                  Session status
+                </Typography>
+                <Typography sx={{ mt: 0.8, fontWeight: 700 }}>
+                  {session?.status || "Not created yet"}
+                </Typography>
+                <Typography sx={{ mt: 1, color: "rgba(255,255,255,0.68)" }}>
+                  Room: {session?.room_name || `creator-${user?.creator?.id || "room"}`}
+                </Typography>
+              </Box>
+
+              <Stack spacing={1.2}>
+                <Typography fontWeight={800}>Publishing flow</Typography>
+                {[
+                  "Start the local preview once so the browser gets camera and microphone access.",
+                  "Click Go live to create or update the session, request a publisher token, and connect to the LiveKit room.",
+                  "Open the public room link in another tab to verify viewer playback.",
+                ].map((item) => (
+                  <Typography key={item} sx={{ color: "rgba(255,255,255,0.72)" }}>
+                    {item}
+                  </Typography>
+                ))}
+              </Stack>
+
+              {liveRoomUrl && (
+                <Button
+                  component={Link}
+                  to={`/live/${user?.creator?.id}`}
+                  variant="contained"
+                  sx={{ borderRadius: 999, bgcolor: "#d7263d", "&:hover": { bgcolor: "#bb2034" } }}
+                >
+                  Open viewer page
+                </Button>
+              )}
+            </Stack>
+          </CardContent>
+        </Card>
+        </Stack>
+
+        {user?.creator?.id && (
+          <LiveChatPanel
+            roomName={`creator:${user.creator.id}`}
+            dark
+            enabled
+            title="Audience chat"
+            subtitle="Messages are fanned out through Kafka, so this panel mirrors what viewers see on the public live page."
+          />
+        )}
+      </Stack>
+    </Box>
+  );
+}
+
+
+====================================================================================================
+FILE: frontend/src/pages/creator/CreatorStudio.jsx
+====================================================================================================
+
+import { useEffect, useMemo, useState } from "react";
+import { Link, useNavigate } from "react-router-dom";
+import LiveTvIcon from "@mui/icons-material/LiveTv";
+import RadioButtonCheckedIcon from "@mui/icons-material/RadioButtonChecked";
+import RefreshIcon from "@mui/icons-material/Refresh";
+import VideocamIcon from "@mui/icons-material/Videocam";
+
+import { createChannel } from "../../api/creator.api";
+import { fetchCreatorStudioGraphql } from "../../api/graphql.api";
+import {
+  cancelPremiereSession,
+  endPremiereSession,
+  fetchMyPremiereSession,
+  schedulePremiereSession,
+} from "../../api/live.api";
+import { deleteCreatorVideo, updateVideoVisibility } from "../../api/video.api";
+import { useAuth } from "../../auth/AuthContext";
+import VideoCard from "../../components/common/VideoCard";
+
+import {
+  Alert,
+  Box,
+  Button,
+  Card,
+  CardContent,
+  Chip,
+  CircularProgress,
+  Divider,
+  Grid,
+  Stack,
+  TextField,
+  Typography,
+} from "@mui/material";
+
+const instructions = [
+  "Open the browser live studio to preview your camera and microphone.",
+  "Go live to publish directly into the creator room over WebRTC.",
+  "Share the public room URL so viewers can join the live page instantly.",
+];
+
+export default function CreatorStudio() {
+  const { user, refreshUser } = useAuth();
+  const navigate = useNavigate();
+
+  const creator = user?.creator;
+
+  const [videos, setVideos] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [savingChannel, setSavingChannel] = useState(false);
+  const [liveLoading, setLiveLoading] = useState(false);
+  const [channelLoading, setChannelLoading] = useState(false);
+  const [statusMessage, setStatusMessage] = useState("");
+  const [error, setError] = useState("");
+  const [isLive, setIsLive] = useState(false);
+  const [premiere, setPremiere] = useState(null);
+  const [premiereVideoId, setPremiereVideoId] = useState("");
+  const [premiereTitle, setPremiereTitle] = useState("");
+  const [premiereDescription, setPremiereDescription] = useState("");
+  const [premiereStartAt, setPremiereStartAt] = useState("");
+  const [premiereSaving, setPremiereSaving] = useState(false);
+  const [premiereCancelling, setPremiereCancelling] = useState(false);
+  const [premiereEnding, setPremiereEnding] = useState(false);
+  const [visibilitySavingId, setVisibilitySavingId] = useState(null);
+  const [deletingVideoId, setDeletingVideoId] = useState(null);
+
+  const [channelName, setChannelName] = useState("");
+  const [description, setDescription] = useState("");
+
+  const liveRoomUrl = useMemo(() => {
+    if (!creator?.id) {
+      return "";
+    }
+    return `${window.location.origin}/live/${creator.id}`;
+  }, [creator?.id]);
+
+  const loadStudio = async () => {
+    const [data, premiereData] = await Promise.all([
+      fetchCreatorStudioGraphql(),
+      fetchMyPremiereSession().catch(() => ({ premiere: null })),
+    ]);
+    const nextVideos = data?.videos || [];
+    setVideos(nextVideos);
+    setIsLive(Boolean(data?.isLive));
+    setPremiere(premiereData?.premiere || null);
+    if (
+      !premiereVideoId ||
+      !nextVideos.some((video) => String(video.id) === String(premiereVideoId))
+    ) {
+      const firstReadyVideo = nextVideos.find(
+        (video) => String(video.status).toUpperCase() === "READY"
+      );
+      if (firstReadyVideo) {
+        setPremiereVideoId(String(firstReadyVideo.id));
+      } else {
+        setPremiereVideoId("");
+      }
+    }
+  };
+
+  useEffect(() => {
+    if (!creator) {
+      setLoading(false);
+      return;
+    }
+
+    let mounted = true;
+
+    const run = async () => {
+      try {
+        setLoading(true);
+        setError("");
+        const [data, premiereData] = await Promise.all([
+          fetchCreatorStudioGraphql(),
+          fetchMyPremiereSession().catch(() => ({ premiere: null })),
+        ]);
+        if (!mounted) {
+          return;
+        }
+        const nextVideos = data?.videos || [];
+        setVideos(nextVideos);
+        setIsLive(Boolean(data?.isLive));
+        setPremiere(premiereData?.premiere || null);
+        if (
+          !premiereVideoId ||
+          !nextVideos.some((video) => String(video.id) === String(premiereVideoId))
+        ) {
+          const firstReadyVideo = nextVideos.find(
+            (video) => String(video.status).toUpperCase() === "READY"
+          );
+          setPremiereVideoId(firstReadyVideo ? String(firstReadyVideo.id) : "");
+        }
+      } catch {
+        if (mounted) {
+          setError("Unable to load creator studio.");
+        }
+      } finally {
+        if (mounted) {
+          setLoading(false);
+        }
+      }
+    };
+
+    run();
+    const timer = window.setInterval(run, 15000);
+
+    return () => {
+      mounted = false;
+      window.clearInterval(timer);
+    };
+  }, [creator]);
+
+  const handleCreateChannel = async () => {
+    if (!channelName.trim()) {
+      setError("Channel name is required.");
+      return;
+    }
+
+    try {
+      setSavingChannel(true);
+      setError("");
+      setStatusMessage("");
+
+      await createChannel({
+        channel_name: channelName,
+        description,
+      });
+
+      await refreshUser();
+      setStatusMessage("Channel created. Your creator studio is ready.");
+    } catch (err) {
+      setError(err?.response?.data?.detail || "Failed to create channel.");
+    } finally {
+      setSavingChannel(false);
+    }
+  };
+
+  const refreshLiveStatus = async () => {
+    if (!creator?.id) {
+      return;
+    }
+
+    try {
+      setLiveLoading(true);
+      await loadStudio();
+    } catch {
+      setError("Unable to refresh live status.");
+    } finally {
+      setLiveLoading(false);
+    }
+  };
+
+  const refreshChannelProfile = async () => {
+    try {
+      setChannelLoading(true);
+      await refreshUser();
+      await loadStudio();
+      setStatusMessage("Creator profile refreshed.");
+    } catch {
+      setError("Unable to refresh your profile.");
+    } finally {
+      setChannelLoading(false);
+    }
+  };
+
+  const readyVideos = videos.filter((video) => String(video.status).toUpperCase() === "READY");
+
+  const handleSchedulePremiere = async () => {
+    if (!premiereVideoId || !premiereStartAt) {
+      setError("Choose a ready video and a fixed start time.");
+      return;
+    }
+
+    try {
+      setPremiereSaving(true);
+      setError("");
+      setStatusMessage("");
+      const payload = {
+        video_id: Number(premiereVideoId),
+        scheduled_start_at: new Date(premiereStartAt).toISOString(),
+        ...(premiereTitle.trim() ? { title: premiereTitle.trim() } : {}),
+        ...(premiereDescription.trim() ? { description: premiereDescription.trim() } : {}),
+      };
+
+      const data = await schedulePremiereSession(payload);
+      setPremiere(data?.premiere || null);
+      setStatusMessage("Scheduled premiere saved. Your public live page will switch over at the chosen time.");
+    } catch (err) {
+      setError(err?.response?.data?.detail || "Unable to schedule the premiere.");
+    } finally {
+      setPremiereSaving(false);
+    }
+  };
+
+  const handleCancelPremiere = async () => {
+    if (!premiere?.id) {
+      return;
+    }
+
+    try {
+      setPremiereCancelling(true);
+      setError("");
+      await cancelPremiereSession(premiere.id);
+      setPremiere(null);
+      setStatusMessage("Scheduled premiere cancelled.");
+    } catch (err) {
+      setError(err?.response?.data?.detail || "Unable to cancel the premiere.");
+    } finally {
+      setPremiereCancelling(false);
+    }
+  };
+
+  const handleEndPremiere = async () => {
+    if (!premiere?.id) {
+      return;
+    }
+
+    try {
+      setPremiereEnding(true);
+      setError("");
+      await endPremiereSession(premiere.id);
+      setPremiere(null);
+      setStatusMessage("Premiere ended. The public live page will return to the normal channel state.");
+      await loadStudio();
+    } catch (err) {
+      setError(err?.response?.data?.detail || "Unable to end the premiere.");
+    } finally {
+      setPremiereEnding(false);
+    }
+  };
+
+  const handleVisibilityChange = async (videoId, nextVisibility) => {
+    try {
+      setVisibilitySavingId(videoId);
+      setError("");
+      await updateVideoVisibility({ video_id: videoId, visibility: nextVisibility });
+      setVideos((prev) =>
+        prev.map((video) =>
+          video.id === videoId ? { ...video, visibility: nextVisibility } : video
+        )
+      );
+      const toggledVideo = videos.find((video) => video.id === videoId);
+      setStatusMessage(
+        `${toggledVideo?.title || "Video"} is now ${String(nextVisibility).toLowerCase()}.`
+      );
+    } catch (err) {
+      setError(err?.response?.data?.detail || "Unable to update video visibility.");
+    } finally {
+      setVisibilitySavingId(null);
+    }
+  };
+
+  const handleDeleteVideo = async (videoId) => {
+    const targetVideo = videos.find((video) => video.id === videoId);
+    if (!targetVideo) {
+      return;
+    }
+
+    const confirmed = window.confirm(
+      `Delete "${targetVideo.title}"? This removes the source upload, processed HLS files, and thumbnail.`
+    );
+    if (!confirmed) {
+      return;
+    }
+
+    try {
+      setDeletingVideoId(videoId);
+      setError("");
+      await deleteCreatorVideo({ video_id: videoId });
+      const remainingVideos = videos.filter((video) => video.id !== videoId);
+      setVideos(remainingVideos);
+      setStatusMessage(`"${targetVideo.title}" was deleted.`);
+
+      if (String(premiereVideoId) === String(videoId)) {
+        const remainingReadyVideo = remainingVideos.find(
+          (video) => String(video.status).toUpperCase() === "READY"
+        );
+        setPremiereVideoId(remainingReadyVideo ? String(remainingReadyVideo.id) : "");
+      }
+    } catch (err) {
+      setError(err?.response?.data?.detail || "Unable to delete the video.");
+    } finally {
+      setDeletingVideoId(null);
+    }
+  };
+
+  if (loading) {
+    return (
+      <Box sx={{ display: "flex", justifyContent: "center", mt: 8 }}>
+        <CircularProgress />
+      </Box>
+    );
+  }
+
+  if (!creator) {
+    return (
+      <Box sx={{ maxWidth: 560, mx: "auto", mt: 6 }}>
+        <Card sx={{ borderRadius: 4 }}>
+          <CardContent sx={{ p: 4 }}>
+            <Typography variant="h5" fontWeight="bold">
+              Create Your Channel
+            </Typography>
+
+            <Typography color="text.secondary" sx={{ mt: 1 }}>
+              Set up your identity first, then you can start streaming and uploading.
+            </Typography>
+
+            <TextField
+              label="Channel Name"
+              fullWidth
+              margin="normal"
+              value={channelName}
+              onChange={(e) => setChannelName(e.target.value)}
+            />
+
+            <TextField
+              label="Description"
+              fullWidth
+              multiline
+              rows={3}
+              margin="normal"
+              value={description}
+              onChange={(e) => setDescription(e.target.value)}
+            />
+
+            {error && (
+              <Alert severity="error" sx={{ mt: 2 }}>
+                {error}
+              </Alert>
+            )}
+
+            <Button
+              variant="contained"
+              fullWidth
+              sx={{ mt: 2 }}
+              onClick={handleCreateChannel}
+              disabled={savingChannel}
+            >
+              {savingChannel ? "Creating..." : "Create Channel"}
+            </Button>
+          </CardContent>
+        </Card>
+      </Box>
+    );
+  }
+
+  return (
+    <Box
+      sx={{
+        minHeight: "100vh",
+        px: { xs: 2, md: 4 },
+        py: { xs: 3, md: 5 },
+        background:
+          "linear-gradient(180deg, #f3ece3 0%, #f8f4ed 35%, #fffdf9 100%)",
+      }}
+    >
+      <Stack spacing={3} sx={{ maxWidth: 1200, mx: "auto" }}>
+        <Box
+          sx={{
+            p: { xs: 3, md: 4 },
+            borderRadius: 6,
+            color: "#fff6ed",
+            background:
+              "linear-gradient(135deg, #20110f 0%, #5e1f22 55%, #b2394f 100%)",
+            boxShadow: "0 24px 60px rgba(83, 20, 28, 0.26)",
+          }}
+        >
+          <Stack
+            direction={{ xs: "column", md: "row" }}
+            spacing={3}
+            justifyContent="space-between"
+          >
+            <Box sx={{ maxWidth: 720 }}>
+              <Stack direction="row" spacing={1} alignItems="center" sx={{ mb: 1.5 }}>
+                <Chip
+                  icon={<RadioButtonCheckedIcon sx={{ color: "inherit !important" }} />}
+                  label={isLive ? "Broadcasting" : "Standby"}
+                  sx={{
+                    bgcolor: isLive ? "#e6485c" : "rgba(255,255,255,0.14)",
+                    color: "#fff",
+                    fontWeight: 700,
+                  }}
+                />
+                <Typography sx={{ opacity: 0.8 }}>Creator control room</Typography>
+              </Stack>
+
+              <Typography variant="h3" sx={{ fontWeight: 800, letterSpacing: "-0.03em" }}>
+                {creator.channel_name}
+              </Typography>
+
+              <Typography sx={{ mt: 1.5, maxWidth: 620, color: "rgba(255,246,237,0.84)" }}>
+                Launch your room from the browser studio and send viewers into one clean
+                live page with a single live workflow.
+              </Typography>
+
+              <Stack direction={{ xs: "column", sm: "row" }} spacing={1.5} sx={{ mt: 3 }}>
+                <Button
+                  variant="contained"
+                  startIcon={<LiveTvIcon />}
+                  component={Link}
+                  to="/creator/live"
+                  sx={{
+                    bgcolor: "#fff2e3",
+                    color: "#4a161c",
+                    fontWeight: 700,
+                    "&:hover": { bgcolor: "#ffe6cf" },
+                  }}
+                >
+                  Open live studio
+                </Button>
+                <Button
+                  variant="outlined"
+                  startIcon={<RefreshIcon />}
+                  onClick={refreshLiveStatus}
+                  disabled={liveLoading}
+                  sx={{
+                    borderColor: "rgba(255,255,255,0.4)",
+                    color: "#fff9f2",
+                  }}
+                >
+                  {liveLoading ? "Checking..." : "Refresh status"}
+                </Button>
+              </Stack>
+            </Box>
+
+            <Stack spacing={1.5} sx={{ minWidth: { md: 260 } }}>
+              <Box
+                sx={{
+                  p: 2.5,
+                  borderRadius: 4,
+                  bgcolor: "rgba(255,255,255,0.12)",
+                  backdropFilter: "blur(10px)",
+                }}
+              >
+                <Typography sx={{ opacity: 0.84 }}>Subscribers</Typography>
+                <Typography variant="h4" fontWeight={800}>
+                  {creator.subscribers_count || 0}
+                </Typography>
+              </Box>
+
+              <Box
+                sx={{
+                  p: 2.5,
+                  borderRadius: 4,
+                  bgcolor: "rgba(255,255,255,0.12)",
+                  backdropFilter: "blur(10px)",
+                }}
+              >
+                <Typography sx={{ opacity: 0.84 }}>Uploads</Typography>
+                <Typography variant="h4" fontWeight={800}>
+                  {videos.length}
+                </Typography>
+              </Box>
+            </Stack>
+          </Stack>
+        </Box>
+
+        {(error || statusMessage) && (
+          <Stack spacing={1}>
+            {error && <Alert severity="error">{error}</Alert>}
+            {statusMessage && <Alert severity="success">{statusMessage}</Alert>}
+          </Stack>
+        )}
+
+        <Grid container spacing={3}>
+          <Grid item xs={12} lg={7}>
+            <Card sx={{ height: "100%", borderRadius: 5, boxShadow: "none", border: "1px solid rgba(56, 33, 25, 0.08)" }}>
+              <CardContent sx={{ p: { xs: 3, md: 4 } }}>
+                <Stack spacing={2}>
+                  <Box>
+                    <Typography variant="h5" fontWeight={800}>
+                      Live workflow
+                    </Typography>
+                    <Typography color="text.secondary" sx={{ mt: 0.75 }}>
+                      The live architecture is now browser-first: preview locally,
+                      publish the room, and send viewers to the public page.
+                    </Typography>
+                  </Box>
+
+                  <Box
+                    sx={{
+                      p: 2,
+                      borderRadius: 3,
+                      background: "#fbf6ef",
+                      border: "1px solid rgba(59, 34, 20, 0.08)",
+                    }}
+                  >
+                    <Typography fontWeight={700}>Creator studio</Typography>
+                    <Typography sx={{ mt: 0.75, color: "text.secondary" }}>
+                      Open the live studio to access your camera and microphone directly
+                      in the browser and publish into your room with one click.
+                    </Typography>
+                  </Box>
+
+                  <Box
+                    sx={{
+                      p: 2,
+                      borderRadius: 3,
+                      background: "#fbf6ef",
+                      border: "1px solid rgba(59, 34, 20, 0.08)",
+                    }}
+                  >
+                    <Typography fontWeight={700}>Audience path</Typography>
+                    <Typography sx={{ mt: 0.75, color: "text.secondary", wordBreak: "break-all" }}>
+                      {liveRoomUrl}
+                    </Typography>
+                  </Box>
+
+                  <Box
+                    sx={{
+                      p: 2.25,
+                      borderRadius: 3,
+                      background: isLive ? "#fff1f2" : "#f3f0ec",
+                      border: "1px solid rgba(59, 34, 20, 0.08)",
+                    }}
+                  >
+                    <Typography fontWeight={700}>Broadcast status</Typography>
+                    <Typography sx={{ mt: 0.75, color: "text.secondary" }}>
+                      {isLive
+                        ? "Your channel is live. Viewers can watch the room now."
+                        : "You are offline. Open the browser live studio when you're ready to broadcast."}
+                    </Typography>
+                    {!isLive && premiere?.upcoming && (
+                      <Typography sx={{ mt: 1.25, color: "text.secondary" }}>
+                        Scheduled premiere: {premiere.title} at{" "}
+                        {new Date(premiere.scheduled_start_at).toLocaleString()}.
+                      </Typography>
+                    )}
+                    {isLive && (
+                      <Button
+                        component={Link}
+                        to={`/live/${creator.id}`}
+                        sx={{ mt: 1.5 }}
+                        variant="contained"
+                        color="error"
+                      >
+                        Watch public live page
+                      </Button>
+                    )}
+                  </Box>
+                </Stack>
+              </CardContent>
+            </Card>
+          </Grid>
+
+          <Grid item xs={12} lg={5}>
+            <Card sx={{ height: "100%", borderRadius: 5, boxShadow: "none", border: "1px solid rgba(56, 33, 25, 0.08)" }}>
+              <CardContent sx={{ p: { xs: 3, md: 4 } }}>
+                <Stack direction="row" spacing={1.5} alignItems="center">
+                  <VideocamIcon sx={{ color: "#9f2439" }} />
+                  <Typography variant="h5" fontWeight={800}>
+                    Broadcast guide
+                  </Typography>
+                </Stack>
+
+                <Typography color="text.secondary" sx={{ mt: 1 }}>
+                  A clean handoff from creator dashboard to live playback.
+                </Typography>
+
+                <Stack spacing={1.5} sx={{ mt: 3 }}>
+                  {instructions.map((item) => (
+                    <Box
+                      key={item}
+                      sx={{
+                        p: 2,
+                        borderRadius: 3,
+                        background: "#fcf8f3",
+                        border: "1px solid rgba(56, 33, 25, 0.08)",
+                      }}
+                    >
+                      <Typography color="#4d332b">{item}</Typography>
+                    </Box>
+                  ))}
+                </Stack>
+
+                <Divider sx={{ my: 3 }} />
+
+                <Typography fontWeight={700}>Public room URL</Typography>
+                <Typography
+                  sx={{
+                    mt: 1,
+                    color: "text.secondary",
+                    fontFamily: "monospace",
+                    wordBreak: "break-all",
+                  }}
+                >
+                  {liveRoomUrl}
+                </Typography>
+                <Stack direction={{ xs: "column", sm: "row" }} spacing={1.5} sx={{ mt: 2 }}>
+                  <Button
+                    variant="text"
+                    onClick={refreshChannelProfile}
+                    disabled={channelLoading}
+                  >
+                    {channelLoading ? "Refreshing..." : "Refresh profile"}
+                  </Button>
+                </Stack>
+
+                <Divider sx={{ my: 3 }} />
+
+                <Typography fontWeight={700}>Schedule cloud video premiere</Typography>
+                <Typography color="text.secondary" sx={{ mt: 0.75 }}>
+                  Pick one of your processed uploads and send it live on the public page at a fixed time. Both public and private ready videos can be premiered here.
+                </Typography>
+
+                <TextField
+                  select
+                  fullWidth
+                  label="Ready video"
+                  value={premiereVideoId}
+                  onChange={(event) => setPremiereVideoId(event.target.value)}
+                  SelectProps={{ native: true }}
+                  sx={{ mt: 2 }}
+                  disabled={premiereSaving || readyVideos.length === 0}
+                >
+                  <option value="">
+                    {readyVideos.length === 0 ? "No ready videos available" : "Select a video"}
+                  </option>
+                  {readyVideos.map((video) => (
+                    <option key={video.id} value={video.id}>
+                      {video.title} ({String(video.visibility || "PUBLIC").toLowerCase()})
+                    </option>
+                  ))}
+                </TextField>
+
+                <TextField
+                  label="Premiere title"
+                  fullWidth
+                  value={premiereTitle}
+                  onChange={(event) => setPremiereTitle(event.target.value)}
+                  sx={{ mt: 2 }}
+                  placeholder="Leave blank to reuse the video title"
+                />
+
+                <TextField
+                  label="Premiere description"
+                  fullWidth
+                  multiline
+                  minRows={3}
+                  value={premiereDescription}
+                  onChange={(event) => setPremiereDescription(event.target.value)}
+                  sx={{ mt: 2 }}
+                  placeholder="Leave blank to reuse the video description"
+                />
+
+                <TextField
+                  label="Start time"
+                  type="datetime-local"
+                  fullWidth
+                  value={premiereStartAt}
+                  onChange={(event) => setPremiereStartAt(event.target.value)}
+                  sx={{ mt: 2 }}
+                  InputLabelProps={{ shrink: true }}
+                />
+
+                <Stack direction={{ xs: "column", sm: "row" }} spacing={1.5} sx={{ mt: 2 }}>
+                  <Button
+                    variant="contained"
+                    onClick={handleSchedulePremiere}
+                    disabled={premiereSaving || readyVideos.length === 0}
+                  >
+                    {premiereSaving ? "Saving..." : "Schedule premiere"}
+                  </Button>
+                  {premiere?.id && premiere?.upcoming && (
+                    <Button
+                      variant="outlined"
+                      color="inherit"
+                      onClick={handleCancelPremiere}
+                      disabled={premiereCancelling}
+                    >
+                      {premiereCancelling ? "Cancelling..." : "Cancel premiere"}
+                    </Button>
+                  )}
+                  {premiere?.id && premiere?.live && (
+                    <Button
+                      variant="outlined"
+                      color="error"
+                      onClick={handleEndPremiere}
+                      disabled={premiereEnding}
+                    >
+                      {premiereEnding ? "Ending..." : "End premiere"}
+                    </Button>
+                  )}
+                </Stack>
+
+                {premiere && premiere.status !== "CANCELLED" && (
+                  <Box
+                    sx={{
+                      mt: 2,
+                      p: 2,
+                      borderRadius: 3,
+                      background: "#fbf6ef",
+                      border: "1px solid rgba(59, 34, 20, 0.08)",
+                    }}
+                  >
+                    <Typography fontWeight={700}>{premiere.title}</Typography>
+                    <Typography sx={{ mt: 0.75, color: "text.secondary" }}>
+                      {premiere.live
+                        ? "Premiere is live now."
+                        : `Starts at ${new Date(premiere.scheduled_start_at).toLocaleString()}`}
+                    </Typography>
+                    <Typography sx={{ mt: 0.75, color: "text.secondary" }}>
+                      Viewers will join through {liveRoomUrl} and watch the uploaded cloud video as a scheduled live event.
+                    </Typography>
+                  </Box>
+                )}
+              </CardContent>
+            </Card>
+          </Grid>
+        </Grid>
+
+        <Card sx={{ borderRadius: 5, boxShadow: "none", border: "1px solid rgba(56, 33, 25, 0.08)" }}>
+          <CardContent sx={{ p: { xs: 3, md: 4 } }}>
+            <Stack
+              direction={{ xs: "column", sm: "row" }}
+              justifyContent="space-between"
+              alignItems={{ xs: "flex-start", sm: "center" }}
+              spacing={2}
+              sx={{ mb: 3 }}
+            >
+              <Box>
+                <Typography variant="h5" fontWeight={800}>
+                  Your videos
+                </Typography>
+                <Typography color="text.secondary" sx={{ mt: 0.75 }}>
+                  Manage your on-demand catalog alongside live programming. Public videos appear for your audience; private videos stay visible only here in studio.
+                </Typography>
+              </Box>
+
+              <Button variant="contained" onClick={() => navigate("/creator/upload")}>
+                Upload Video
+              </Button>
+            </Stack>
+
+            {videos.length === 0 ? (
+              <Box
+                sx={{
+                  p: 4,
+                  borderRadius: 4,
+                  background: "#fbf7f2",
+                  border: "1px dashed rgba(56, 33, 25, 0.18)",
+                }}
+              >
+                <Typography fontWeight={700}>No videos uploaded yet</Typography>
+                <Typography color="text.secondary" sx={{ mt: 1 }}>
+                  Start with a VOD upload or go live first and build your channel momentum.
+                </Typography>
+              </Box>
+            ) : (
+              <Grid container spacing={3}>
+                {videos.map((video) => (
+                  <Grid item key={video.id} xs={12} sm={6} md={4} lg={3}>
+                    <Stack spacing={1.5}>
+                      <VideoCard video={video} />
+                      <Box
+                        sx={{
+                          p: 1.5,
+                          borderRadius: 3,
+                          background: "#fbf7f2",
+                          border: "1px solid rgba(56, 33, 25, 0.08)",
+                        }}
+                      >
+                        <Stack direction="row" spacing={1} alignItems="center" flexWrap="wrap">
+                          <Chip
+                            size="small"
+                            label={String(video.visibility || "PUBLIC").toLowerCase()}
+                            sx={{
+                              bgcolor:
+                                String(video.visibility || "PUBLIC").toUpperCase() === "PRIVATE"
+                                  ? "rgba(212, 127, 48, 0.16)"
+                                  : "rgba(21, 101, 192, 0.10)",
+                              color: "#3f2a21",
+                              fontWeight: 700,
+                            }}
+                          />
+                          <Chip
+                            size="small"
+                            label={String(video.status || "").toLowerCase()}
+                            sx={{ bgcolor: "rgba(56, 33, 25, 0.08)", color: "#3f2a21", fontWeight: 700 }}
+                          />
+                        </Stack>
+                        <Stack direction="row" spacing={1} sx={{ mt: 1.25 }}>
+                          <Button
+                            size="small"
+                            variant={
+                              String(video.visibility || "PUBLIC").toUpperCase() === "PUBLIC"
+                                ? "outlined"
+                                : "contained"
+                            }
+                            onClick={() => handleVisibilityChange(video.id, "PUBLIC")}
+                            disabled={
+                              visibilitySavingId === video.id ||
+                              String(video.visibility || "PUBLIC").toUpperCase() === "PUBLIC"
+                            }
+                          >
+                            {visibilitySavingId === video.id &&
+                            String(video.visibility || "PUBLIC").toUpperCase() !== "PUBLIC"
+                              ? "Saving..."
+                              : "Make public"}
+                          </Button>
+                          <Button
+                            size="small"
+                            variant={
+                              String(video.visibility || "PUBLIC").toUpperCase() === "PRIVATE"
+                                ? "outlined"
+                                : "contained"
+                            }
+                            color="inherit"
+                            onClick={() => handleVisibilityChange(video.id, "PRIVATE")}
+                            disabled={
+                              visibilitySavingId === video.id ||
+                              String(video.visibility || "PUBLIC").toUpperCase() === "PRIVATE"
+                            }
+                          >
+                            {visibilitySavingId === video.id &&
+                            String(video.visibility || "PUBLIC").toUpperCase() !== "PRIVATE"
+                              ? "Saving..."
+                              : "Make private"}
+                          </Button>
+                        </Stack>
+                        <Button
+                          size="small"
+                          color="error"
+                          variant="outlined"
+                          sx={{ mt: 1.25 }}
+                          onClick={() => handleDeleteVideo(video.id)}
+                          disabled={deletingVideoId === video.id}
+                        >
+                          {deletingVideoId === video.id ? "Deleting..." : "Delete video"}
+                        </Button>
+                      </Box>
+                    </Stack>
+                  </Grid>
+                ))}
+              </Grid>
+            )}
+          </CardContent>
+        </Card>
+      </Stack>
+    </Box>
+  );
+}
+
+
+====================================================================================================
+FILE: frontend/src/pages/live/LiveWatch.jsx
+====================================================================================================
+
+import { useEffect, useRef, useState } from "react";
+import { useParams } from "react-router-dom";
+import { Alert, Box, Button, CircularProgress, Stack, Typography } from "@mui/material";
+import LiveChatPanel from "../../components/live/LiveChatPanel";
+import LiveStreamPlayer from "../../components/live/LiveStreamPlayer";
+import { fetchLiveRoom, issueViewerToken } from "../../api/live.api";
+
+export default function LiveWatch() {
+  const { creatorId } = useParams();
+
+  const roomRef = useRef(null);
+  const mediaHostRef = useRef(null);
+  const connectedRoomNameRef = useRef("");
+
+  const [loading, setLoading] = useState(true);
+  const [connecting, setConnecting] = useState(false);
+  const [streamState, setStreamState] = useState(null);
+  const [viewerCount, setViewerCount] = useState(0);
+  const [error, setError] = useState("");
+
+  const disconnectRoom = () => {
+    if (roomRef.current) {
+      roomRef.current.disconnect();
+      roomRef.current = null;
+    }
+    connectedRoomNameRef.current = "";
+    if (mediaHostRef.current) {
+      mediaHostRef.current.innerHTML = "";
+    }
+  };
+
+  const connectViewer = async (roomName) => {
+    if (!roomName) return;
+
+    if (roomRef.current && connectedRoomNameRef.current === roomName) {
+      return;
+    }
+
+    setConnecting(true);
+
+    try {
+      const tokenData = await issueViewerToken(Number(creatorId));
+      const { Room, RoomEvent } = await import("livekit-client");
+
+      disconnectRoom();
+
+      const room = new Room({
+        adaptiveStream: true,
+        dynacast: true,
+      });
+
+      room.on(RoomEvent.TrackSubscribed, (track) => {
+        const element = track.attach();
+
+        if (track.kind === "video") {
+          element.style.width = "100%";
+          element.style.height = "100%";
+          element.style.objectFit = "cover";
+
+          mediaHostRef.current.innerHTML = "";
+          mediaHostRef.current.appendChild(element);
+        }
+
+        if (track.kind === "audio") {
+          element.style.display = "none";
+          mediaHostRef.current.appendChild(element);
+        }
+      });
+
+      await room.connect(tokenData.url, tokenData.token);
+
+      roomRef.current = room;
+      connectedRoomNameRef.current = roomName;
+    } catch (err) {
+      console.error(err);
+      setError("Failed to connect to live stream");
+    } finally {
+      setConnecting(false);
+    }
+  };
+
+  const fetchViewers = async (room) => {
+    try {
+      const res = await fetch(`/live/viewers/${room}`);
+      const data = await res.json();
+      setViewerCount(data.count || 0);
+    } catch {}
+  };
+
+  const load = async () => {
+    try {
+      const data = await fetchLiveRoom(creatorId);
+      setStreamState(data);
+      setError("");
+
+      if (data?.mode === "live" && data?.room_name) {
+        await connectViewer(data.room_name);
+        fetchViewers(data.room_name);
+        return;
+      }
+
+      disconnectRoom();
+
+      if (data?.mode === "premiere" && data?.playUrl) {
+        return;
+      }
+
+      setError("Creator is offline");
+    } catch (err) {
+      console.error(err);
+      setError("Failed to load stream");
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    load();
+    const timer = setInterval(load, 15000);
+
+    return () => {
+      clearInterval(timer);
+      disconnectRoom();
+    };
+  }, [creatorId]);
+
+  if (loading) {
+    return (
+      <Box sx={{ textAlign: "center", mt: 10 }}>
+        <CircularProgress />
+      </Box>
+    );
+  }
+
+  return (
+    <Box sx={{ maxWidth: 1200, mx: "auto", p: 3 }}>
+      <Stack spacing={2}>
+        <Typography variant="h4" fontWeight={800}>
+          {streamState?.title || "Live room"}
+        </Typography>
+
+        {streamState?.mode === "live" && (
+          <Typography color="error" fontWeight={700}>
+            🔴 LIVE • {viewerCount} watching
+          </Typography>
+        )}
+
+        {error && <Typography color="error">{error}</Typography>}
+
+        <Stack direction={{ xs: "column", lg: "row" }} spacing={2}>
+          <Box sx={{ flex: 1 }}>
+            {streamState?.mode === "premiere" && streamState?.playUrl ? (
+              <LiveStreamPlayer
+                src={streamState.playUrl}
+                initialOffsetSeconds={streamState.initialOffsetSeconds || 0}
+              />
+            ) : (
+              <Box
+                ref={mediaHostRef}
+                sx={{
+                  width: "100%",
+                  height: 500,
+                  background: "#000",
+                  borderRadius: "12px",
+                }}
+              />
+            )}
+          </Box>
+
+          <Box sx={{ width: 350 }}>
+            <LiveChatPanel
+              roomName={`creator:${creatorId}`}
+              enabled={true}
+            />
+          </Box>
+        </Stack>
+
+        <Button variant="outlined" onClick={load}>
+          Refresh
+        </Button>
+      </Stack>
+    </Box>
+  );
+}
+
+
+====================================================================================================
+FILE: frontend/src/components/live/LiveStreamPlayer.jsx
+====================================================================================================
+
+import { useEffect, useRef, useState } from "react";
+import Hls from "hls.js";
+
+import { Alert, Box, CircularProgress } from "@mui/material";
+
+export default function LiveStreamPlayer({
+  src,
+  posterHeight = 420,
+  muted = true,
+  initialOffsetSeconds = 0,
+}) {
+  const videoRef = useRef(null);
+  const appliedSourceRef = useRef("");
+  const [playerError, setPlayerError] = useState("");
+  const [isBuffering, setIsBuffering] = useState(true);
+
+  useEffect(() => {
+    const video = videoRef.current;
+    if (!video || !src) {
+      return undefined;
+    }
+
+    setPlayerError("");
+    setIsBuffering(true);
+
+    const handleLoaded = () => setIsBuffering(false);
+    const handleWaiting = () => setIsBuffering(true);
+    const handlePlaying = () => setIsBuffering(false);
+    const startPlayback = async () => {
+      try {
+        await video.play();
+      } catch {
+        if (!video.muted) {
+          video.muted = true;
+          try {
+            await video.play();
+          } catch {
+            // Ignore autoplay failures until the user interacts.
+          }
+        }
+      }
+    };
+    const applyInitialOffset = () => {
+      if (appliedSourceRef.current === src) {
+        return;
+      }
+
+      appliedSourceRef.current = src;
+      if (!initialOffsetSeconds || Number.isNaN(initialOffsetSeconds)) {
+        return;
+      }
+
+      try {
+        if (Number.isFinite(video.duration) && video.duration > 0) {
+          video.currentTime = Math.min(initialOffsetSeconds, Math.max(video.duration - 1, 0));
+        } else {
+          video.currentTime = initialOffsetSeconds;
+        }
+      } catch {
+        // Ignore seek failures for still-loading media.
+      }
+    };
+
+    video.addEventListener("loadeddata", handleLoaded);
+    video.addEventListener("waiting", handleWaiting);
+    video.addEventListener("playing", handlePlaying);
+    video.addEventListener("loadedmetadata", applyInitialOffset);
+
+    let hls;
+
+    if (video.canPlayType("application/vnd.apple.mpegurl")) {
+      video.muted = muted;
+      video.src = src;
+      startPlayback();
+    } else if (Hls.isSupported()) {
+      hls = new Hls({
+        lowLatencyMode: false,
+        backBufferLength: 90,
+        maxBufferLength: 60,
+        maxMaxBufferLength: 120,
+      });
+
+      hls.loadSource(src);
+      hls.attachMedia(video);
+
+      hls.on(Hls.Events.MANIFEST_PARSED, () => {
+        video.muted = muted;
+        startPlayback();
+      });
+
+      hls.on(Hls.Events.ERROR, (_, data) => {
+        if (data?.fatal) {
+          setPlayerError("Live stream failed to load. Please try again.");
+          if (data.type === Hls.ErrorTypes.NETWORK_ERROR) {
+            hls.startLoad();
+          } else {
+            hls.destroy();
+          }
+        }
+      });
+    } else {
+      setPlayerError("This browser does not support HLS playback.");
+    }
+
+    return () => {
+      video.pause();
+      video.removeEventListener("loadeddata", handleLoaded);
+      video.removeEventListener("waiting", handleWaiting);
+      video.removeEventListener("playing", handlePlaying);
+      video.removeEventListener("loadedmetadata", applyInitialOffset);
+      if (hls) {
+        hls.destroy();
+      }
+    };
+  }, [src, muted]);
+
+  return (
+    <Box>
+      <Box
+        sx={{
+          position: "relative",
+          overflow: "hidden",
+          borderRadius: 4,
+          border: "1px solid rgba(18, 18, 18, 0.08)",
+          background:
+            "radial-gradient(circle at top, rgba(196, 37, 74, 0.28), transparent 45%), #080808",
+          minHeight: posterHeight,
+        }}
+      >
+        <video
+          ref={videoRef}
+          controls
+          playsInline
+          muted={muted}
+          style={{
+            width: "100%",
+            height: "100%",
+            display: "block",
+            background: "#080808",
+          }}
+        />
+
+        {isBuffering && !playerError && (
+          <Box
+            sx={{
+              position: "absolute",
+              inset: 0,
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "center",
+              background: "linear-gradient(180deg, rgba(8,8,8,0.2), rgba(8,8,8,0.55))",
+            }}
+          >
+            <CircularProgress sx={{ color: "#fff7ef" }} />
+          </Box>
+        )}
+      </Box>
+
+      {playerError && (
+        <Alert severity="error" sx={{ mt: 2 }}>
+          {playerError}
+        </Alert>
+      )}
+    </Box>
+  );
+}
+
+
+====================================================================================================
+FILE: frontend/src/components/live/LiveChatPanel.jsx
+====================================================================================================
+
+import { useEffect, useMemo, useRef, useState } from "react";
+
+import {
+  Alert,
+  Box,
+  Button,
+  Card,
+  CardContent,
+  Chip,
+  Stack,
+  TextField,
+  Typography,
+} from "@mui/material";
+
+import { useAuth } from "../../auth/AuthContext";
+
+const buildChatSocketUrl = (roomName, displayName) => {
+  if (!roomName || typeof window === "undefined") {
+    return "";
+  }
+
+  const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
+  const token = localStorage.getItem("token");
+  const url = new URL(
+    `${protocol}//${window.location.host}/live/chat/${encodeURIComponent(roomName)}`
+  );
+
+  if (token) {
+    url.searchParams.set("token", token);
+  }
+  if (displayName) {
+    url.searchParams.set("display_name", displayName);
+  }
+
+  return url.toString();
+};
+
+const mergeMessages = (current, incoming) => {
+  const next = [...current];
+  const seen = new Set(current.map((message) => message.id));
+
+  for (const message of incoming) {
+    if (!message?.id || seen.has(message.id)) {
+      continue;
+    }
+    seen.add(message.id);
+    next.push(message);
+  }
+
+  return next.slice(-100);
+};
+
+export default function LiveChatPanel({
+  roomName,
+  enabled = true,
+  dark = false,
+  title = "Live chat",
+  subtitle = "Audience messages update in real time through Kafka-backed fanout.",
+}) {
+  const { user } = useAuth();
+  const socketRef = useRef(null);
+  const reconnectTimerRef = useRef(null);
+  const messagesEndRef = useRef(null);
+  const manuallyClosedRef = useRef(false);
+
+  const [messages, setMessages] = useState([]);
+  const [draft, setDraft] = useState("");
+  const [status, setStatus] = useState(enabled ? "connecting" : "idle");
+  const [error, setError] = useState("");
+
+  const displayName = useMemo(() => {
+    if (user?.creator?.channel_name) {
+      return user.creator.channel_name;
+    }
+    if (user?.email) {
+      return user.email.split("@")[0];
+    }
+    return "Guest";
+  }, [user]);
+
+  useEffect(() => {
+    messagesEndRef.current?.scrollIntoView({ behavior: "smooth", block: "end" });
+  }, [messages]);
+
+  useEffect(() => {
+    manuallyClosedRef.current = false;
+    setMessages([]);
+
+    if (!enabled || !roomName) {
+      setStatus("idle");
+      return undefined;
+    }
+
+    const connect = () => {
+      const url = buildChatSocketUrl(roomName, displayName);
+      if (!url) {
+        return;
+      }
+
+      setStatus("connecting");
+      setError("");
+
+      const socket = new WebSocket(url);
+      socketRef.current = socket;
+
+      socket.onopen = () => {
+        setStatus("connected");
+        setError("");
+      };
+
+      socket.onmessage = (event) => {
+        try {
+          const payload = JSON.parse(event.data);
+          if (payload?.type === "chat.history") {
+            setMessages(Array.isArray(payload.messages) ? payload.messages : []);
+            return;
+          }
+          if (payload?.type === "chat.message" && payload?.message) {
+            setMessages((current) => mergeMessages(current, [payload.message]));
+          }
+        } catch {
+          // Ignore malformed frames.
+        }
+      };
+
+      socket.onerror = () => {
+        setError("Chat connection hit a network error.");
+      };
+
+      socket.onclose = () => {
+        socketRef.current = null;
+        if (manuallyClosedRef.current || !enabled) {
+          setStatus("idle");
+          return;
+        }
+
+        setStatus("reconnecting");
+      reconnectTimerRef.current = window.setTimeout(connect, 2000);
+      };
+    };
+
+    connect();
+
+    return () => {
+      manuallyClosedRef.current = true;
+      if (reconnectTimerRef.current) {
+        window.clearTimeout(reconnectTimerRef.current);
+      }
+      if (socketRef.current) {
+        socketRef.current.close();
+        socketRef.current = null;
+      }
+    };
+  }, [displayName, enabled, roomName]);
+
+  const handleSend = () => {
+    const socket = socketRef.current;
+    const text = draft.trim();
+
+    if (!socket || socket.readyState !== WebSocket.OPEN || !text) {
+      return;
+    }
+
+    socket.send(JSON.stringify({ text }));
+    setDraft("");
+  };
+
+  const isConnected = status === "connected";
+  const palette = dark
+    ? {
+        card: "#101010",
+        border: "1px solid rgba(255,255,255,0.08)",
+        messageBg: "rgba(255,255,255,0.05)",
+        selfBg: "rgba(215, 38, 61, 0.18)",
+        text: "#fff",
+        muted: "rgba(255,255,255,0.68)",
+        inputBg: "rgba(255,255,255,0.04)",
+      }
+    : {
+        card: "#fffaf4",
+        border: "1px solid rgba(83, 43, 28, 0.08)",
+        messageBg: "#fff",
+        selfBg: "#fff0f2",
+        text: "#2c1a14",
+        muted: "#6b564f",
+        inputBg: "#fff",
+      };
+
+  return (
+    <Card
+      sx={{
+        borderRadius: 5,
+        bgcolor: palette.card,
+        color: palette.text,
+        border: palette.border,
+        boxShadow: "none",
+        minHeight: 540,
+      }}
+    >
+      <CardContent sx={{ p: { xs: 3, md: 3.5 }, height: "100%" }}>
+        <Stack spacing={2.5} sx={{ height: "100%" }}>
+          <Box>
+            <Stack direction="row" spacing={1} alignItems="center" flexWrap="wrap">
+              <Typography variant="h5" fontWeight={800}>
+                {title}
+              </Typography>
+              <Chip
+                size="small"
+                label={
+                  status === "connected"
+                    ? "Connected"
+                    : status === "reconnecting"
+                    ? "Reconnecting"
+                    : status === "connecting"
+                    ? "Connecting"
+                    : "Idle"
+                }
+                sx={{
+                  bgcolor: dark ? "rgba(255,255,255,0.08)" : "rgba(215, 38, 61, 0.10)",
+                  color: palette.text,
+                  fontWeight: 700,
+                }}
+              />
+            </Stack>
+            <Typography sx={{ mt: 0.75, color: palette.muted }}>
+              {subtitle}
+            </Typography>
+          </Box>
+
+          {error && <Alert severity="error">{error}</Alert>}
+
+          <Box
+            sx={{
+              flex: 1,
+              minHeight: 300,
+              maxHeight: 340,
+              overflowY: "auto",
+              pr: 1,
+            }}
+          >
+            <Stack spacing={1.2}>
+              {messages.length === 0 ? (
+                <Box
+                  sx={{
+                    p: 2,
+                    borderRadius: 3,
+                    bgcolor: palette.messageBg,
+                    border: palette.border,
+                  }}
+                >
+                  <Typography sx={{ color: palette.muted }}>
+                    No messages yet. Start the conversation when the room goes live.
+                  </Typography>
+                </Box>
+              ) : (
+                messages.map((message) => {
+                  const isOwnMessage =
+                    user && Number(message?.sender?.user_id) === Number(user.id);
+
+                  return (
+                    <Box
+                      key={message.id}
+                      sx={{
+                        p: 1.5,
+                        borderRadius: 3,
+                        bgcolor: isOwnMessage ? palette.selfBg : palette.messageBg,
+                        border: palette.border,
+                      }}
+                    >
+                      <Stack
+                        direction="row"
+                        spacing={1}
+                        alignItems="center"
+                        justifyContent="space-between"
+                        flexWrap="wrap"
+                      >
+                        <Typography fontWeight={800}>
+                          {message?.sender?.display_name || "Viewer"}
+                        </Typography>
+                        <Typography sx={{ fontSize: 12, color: palette.muted }}>
+                          {message?.sent_at
+                            ? new Date(message.sent_at).toLocaleTimeString([], {
+                                hour: "2-digit",
+                                minute: "2-digit",
+                              })
+                            : ""}
+                        </Typography>
+                      </Stack>
+                      <Typography sx={{ mt: 0.75, whiteSpace: "pre-wrap" }}>
+                        {message.text}
+                      </Typography>
+                    </Box>
+                  );
+                })
+              )}
+              <Box ref={messagesEndRef} />
+            </Stack>
+          </Box>
+
+          <Stack spacing={1.25}>
+            <TextField
+              placeholder={
+                enabled
+                  ? isConnected
+                    ? "Send a message"
+                    : "Waiting for chat connection"
+                  : "Chat becomes available when the room is active"
+              }
+              value={draft}
+              onChange={(event) => setDraft(event.target.value)}
+              onKeyDown={(event) => {
+                if (event.key === "Enter" && !event.shiftKey) {
+                  event.preventDefault();
+                  handleSend();
+                }
+              }}
+              multiline
+              minRows={2}
+              maxRows={5}
+              disabled={!enabled || !isConnected}
+              sx={{
+                "& .MuiOutlinedInput-root": {
+                  borderRadius: 3,
+                  bgcolor: palette.inputBg,
+                  color: palette.text,
+                },
+                "& .MuiInputBase-input::placeholder": {
+                  color: palette.muted,
+                  opacity: 1,
+                },
+              }}
+            />
+            <Stack direction="row" justifyContent="space-between" alignItems="center">
+              <Typography sx={{ color: palette.muted, fontSize: 13 }}>
+                Posting as {displayName}
+              </Typography>
+              <Button
+                variant="contained"
+                onClick={handleSend}
+                disabled={!enabled || !isConnected || !draft.trim()}
+                sx={{
+                  borderRadius: 999,
+                  bgcolor: dark ? "#d7263d" : "#7d2230",
+                  "&:hover": {
+                    bgcolor: dark ? "#bd1f33" : "#691c28",
+                  },
+                }}
+              >
+                Send
+              </Button>
+            </Stack>
+          </Stack>
+        </Stack>
+      </CardContent>
+    </Card>
+  );
+}
+
+
+====================================================================================================
+FILE: frontend/src/pages/channel/ChannelPage.jsx
+====================================================================================================
+
+import { useEffect, useState } from "react";
+import { Link, useParams } from "react-router-dom";
+import { Alert, Box, Button, Chip, Grid, Stack, Typography } from "@mui/material";
+
+import VideoCard from "../../components/common/VideoCard";
+import { fetchChannelPageGraphql } from "../../api/graphql.api";
+import {
+  subscribeCreator,
+  unSubscribe,
+} from "../../api/subscription.api";
+import { useAuth } from "../../auth/AuthContext";
+
+export default function ChannelPage() {
+  const { creatorId } = useParams();
+  const { user } = useAuth();
+
+  const [channel, setChannel] = useState(null);
+  const [videos, setVideos] = useState([]);
+  const [isSubscribed, setIsSubscribed] = useState(false);
+  const [isLive, setIsLive] = useState(false);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState("");
+
+  useEffect(() => {
+    let mounted = true;
+
+    const load = async () => {
+      try {
+        setLoading(true);
+        setError("");
+
+        const data = await fetchChannelPageGraphql(creatorId);
+        if (!mounted) {
+          return;
+        }
+
+        setChannel(data.channel);
+        setVideos(data.videos);
+        setIsLive(Boolean(data.isLive));
+        setIsSubscribed(Boolean(data.isSubscribed));
+      } catch (err) {
+        if (!mounted) {
+          return;
+        }
+        setError("Failed to load channel page.");
+      } finally {
+        if (mounted) {
+          setLoading(false);
+        }
+      }
+    };
+
+    load();
+    const timer = window.setInterval(load, 15000);
+
+    return () => {
+      mounted = false;
+      window.clearInterval(timer);
+    };
+  }, [creatorId, user]);
+
+  const handleSubscribe = async () => {
+    if (!user) {
+      alert("Please login to subscribe");
+      return;
+    }
+
+    try {
+      if (isSubscribed) {
+        await unSubscribe(creatorId);
+        setIsSubscribed(false);
+      } else {
+        await subscribeCreator(creatorId);
+        setIsSubscribed(true);
+      }
+    } catch (err) {
+      console.error("Subscription failed", err);
+    }
+  };
+
+  if (loading) {
+    return <Typography sx={{ p: 4 }}>Loading channel...</Typography>;
+  }
+
+  if (!channel) {
+    return <Typography sx={{ p: 4 }}>Channel not found</Typography>;
+  }
+
+  return (
+    <Box
+      sx={{
+        minHeight: "100vh",
+        px: { xs: 2, md: 4 },
+        py: 4,
+        background: "linear-gradient(180deg, #0f0f0f 0%, #111111 100%)",
+      }}
+    >
+      <Stack spacing={3} sx={{ maxWidth: 1200, mx: "auto" }}>
+        {error && <Alert severity="error">{error}</Alert>}
+
+        <Box
+          sx={{
+            borderRadius: 4,
+            p: { xs: 3, md: 4 },
+            color: "#fff",
+            background:
+              "linear-gradient(90deg, rgba(0,0,0,0.95) 0%, rgba(34,34,34,0.92) 100%)",
+            border: "1px solid rgba(255,255,255,0.08)",
+          }}
+        >
+          <Stack
+            direction={{ xs: "column", md: "row" }}
+            justifyContent="space-between"
+            spacing={3}
+          >
+            <Box sx={{ maxWidth: 760 }}>
+              <Stack direction="row" spacing={1} alignItems="center" flexWrap="wrap">
+                <Chip
+                  label={isLive ? "Live Now" : "Channel"}
+                  sx={{
+                    bgcolor: isLive ? "#ff0000" : "rgba(255,255,255,0.14)",
+                    color: "#fff",
+                    fontWeight: 700,
+                    borderRadius: 999,
+                  }}
+                />
+                <Typography sx={{ opacity: 0.82 }}>
+                  {channel.subscribersCount ?? 0} subscribers
+                </Typography>
+              </Stack>
+
+              <Typography variant="h3" fontWeight={800} sx={{ mt: 1.5, letterSpacing: "-0.03em" }}>
+                {channel.channelName}
+              </Typography>
+
+              {channel.description && (
+                <Typography sx={{ mt: 1.5, color: "rgba(255,247,239,0.86)", maxWidth: 660 }}>
+                  {channel.description}
+                </Typography>
+              )}
+            </Box>
+
+            <Stack direction={{ xs: "column", sm: "row" }} spacing={1.5}>
+              {isLive && (
+                <Button
+                  component={Link}
+                  to={`/live/${creatorId}`}
+                  variant="contained"
+                  sx={{ bgcolor: "#ff0000", borderRadius: 999 }}
+                >
+                  Watch Live
+                </Button>
+              )}
+
+              <Button
+                variant={isSubscribed ? "outlined" : "contained"}
+                onClick={handleSubscribe}
+                sx={{
+                  color: isSubscribed ? "#fff" : "#111",
+                  bgcolor: isSubscribed ? "transparent" : "#fff",
+                  borderColor: "rgba(255,255,255,0.35)",
+                  borderRadius: 999,
+                }}
+              >
+                {isSubscribed ? "Subscribed" : "Subscribe"}
+              </Button>
+            </Stack>
+          </Stack>
+        </Box>
+
+        <Box>
+          <Typography variant="h5" fontWeight={800} gutterBottom>
+            Videos
+          </Typography>
+
+          <Grid container spacing={3}>
+            {videos.length === 0 ? (
+              <Typography sx={{ px: 2, color: "text.secondary" }}>
+                No videos uploaded yet.
+              </Typography>
+            ) : (
+              videos.map((video) => (
+                <Grid item xs={12} sm={6} md={4} lg={3} key={video.id}>
+                  <VideoCard video={video} />
+                </Grid>
+              ))
+            )}
+          </Grid>
+        </Box>
+      </Stack>
+    </Box>
+  );
+}
+
+

@@ -1,0 +1,40 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: api-config
+  namespace: video-platform
+data:
+  APP_NAME: "VideoStreamingBackend"
+  DEBUG: "true"
+
+  DATABASE_URL: "postgresql+asyncpg://postgres:postgres@postgres:5432/video_platform"
+
+  JWT_ALGORITHM: "HS256"
+  ACCESS_TOKEN_EXPIRE_MINUTES: "60"
+
+  MAIL_FROM: "sagarpaal116@gmail.com"
+  MAIL_SERVER: "smtp.gmail.com"
+  MAIL_PORT: "587"
+  MAIL_STARTTLS: "true"
+
+  KAFKA_BOOTSTRAP_SERVERS: "kafka:29092"
+
+  REDIS_HOST: "redis"
+  REDIS_PORT: "6379"
+  REDIS_URL: "redis://redis:6379/0"
+
+  AWS_REGION: "ap-south-1"
+  S3_BUCKET: "amz-video-stream-app"
+
+  CLOUDFRONT_DOMAIN: "d3uio1c0tfrxi8.cloudfront.net"
+  CLOUDFRONT_KEY_PAIR_ID: "K1MUI7R682M08I"
+  CLOUDFRONT_PRIVATE_KEY_PATH: "/app/keys/cloudfront_rsa.pem"
+
+  LIVEKIT_URL: "ws://livekit:7880"
+  LIVEKIT_PUBLIC_URL: "ws://livekit:7880"
+
+  STORAGE_BACKEND: "local"
+  LOCAL_MEDIA_ROOT: "/app/media"
+  MEDIA_BASE_URL: "http://api:8000/media"
+
+  CORS_ORIGINS: "http://frontend"

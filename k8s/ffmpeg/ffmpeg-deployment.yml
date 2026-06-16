@@ -1,0 +1,60 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ffmpeg-worker
+  namespace: video-platform
+
+spec:
+  replicas: 1
+
+  selector:
+    matchLabels:
+      app: ffmpeg
+
+  template:
+    metadata:
+      labels:
+        app: ffmpeg
+
+    spec:
+      enableServiceLinks: false
+
+      containers:
+        - name: ffmpeg
+          image: 9836sagar9836/video-ffmpeg:v1
+
+          env:
+            - name: DATABASE_URL
+              value: "postgresql+asyncpg://postgres:postgres@postgres:5432/video_platform"
+
+            - name: KAFKA_BOOTSTRAP_SERVERS
+              value: "kafka:29092"
+
+            - name: REDIS_HOST
+              value: "redis"
+
+            - name: REDIS_PORT
+              value: "6379"
+
+            - name: REDIS_URL
+              value: "redis://redis:6379/0"
+
+            - name: STORAGE_BACKEND
+              value: "local"
+
+            - name: LOCAL_MEDIA_ROOT
+              value: "/worker/media"
+
+          volumeMounts:
+            - name: worker-media
+              mountPath: /worker/media
+
+            - name: recordings
+              mountPath: /tmp
+
+      volumes:
+        - name: worker-media
+          emptyDir: {}
+
+        - name: recordings
+          emptyDir: {}

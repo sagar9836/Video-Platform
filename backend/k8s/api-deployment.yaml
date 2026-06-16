@@ -1,0 +1,31 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: api-deployment
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: api
+  template:
+    metadata:
+      labels:
+        app: api
+    spec:
+      containers:
+      - name: api
+        image: 9836sagar9836/api:latest
+        ports:
+        - containerPort: 8000
+
+        envFrom:
+        - configMapRef:
+            name: api-config
+        - secretRef:
+            name: api-secrete
+
+        resources:
+          requests:
+            cpu: "200m"
+          limits:
+            cpu: "500m"

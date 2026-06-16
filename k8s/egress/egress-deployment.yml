@@ -1,0 +1,48 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: livekit-egress
+  namespace: video-platform
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: livekit-egress
+  template:
+    metadata:
+      labels:
+        app: livekit-egress
+    spec:
+      containers:
+        - name: egress
+          image: livekit/egress
+
+          args:
+            - "--config"
+            - "/etc/egress.yaml"
+
+          env:
+            - name: LIVEKIT_API_KEY
+              value: "devkey"
+
+            - name: LIVEKIT_API_SECRET
+              value: "your-secret"
+
+            - name: LIVEKIT_WS_URL
+              value: "ws://livekit:7880"
+
+          volumeMounts:
+            - name: egress-config
+              mountPath: /etc/egress.yaml
+              subPath: egress.yaml
+
+            - name: recordings
+              mountPath: /tmp
+
+      volumes:
+        - name: egress-config
+          configMap:
+            name: egress-config
+
+        - name: recordings
+          emptyDir: {}

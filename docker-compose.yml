@@ -1,0 +1,211 @@
+services:
+  frontend:
+    build:
+      context: ./frontend
+      args:
+        VITE_API_BASE_URL: ${VITE_API_BASE_URL:-}
+    container_name: video-platform-frontend
+    depends_on:
+      api:
+        condition: service_healthy
+    ports:
+      - "3000:80"
+    restart: unless-stopped
+    networks:
+      - video_platform_net
+
+  api:
+    build:
+      context: ./backend
+    container_name: video-platform-api
+    env_file:
+      - .env
+    environment:
+      DATABASE_URL: postgresql+asyncpg://postgres:postgres@postgres:5432/video_platform
+      KAFKA_BOOTSTRAP_SERVERS: kafka:29092
+      REDIS_URL: redis://redis:6379/0
+      STORAGE_BACKEND: ${STORAGE_BACKEND:-local}
+      LOCAL_MEDIA_ROOT: /app/media
+      MEDIA_BASE_URL: ${MEDIA_BASE_URL:-http://localhost:8000/media}
+      LIVEKIT_URL: ws://livekit:7880
+      LIVEKIT_PUBLIC_URL: ${LIVEKIT_PUBLIC_URL:-ws://localhost:7880}
+      CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:3000,http://127.0.0.1:3000}
+    volumes:
+      - ./backend/media:/app/media
+    depends_on:
+      postgres:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+      redis:
+        condition: service_started
+      livekit:
+        condition: service_healthy
+    ports:
+      - "8000:8000"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health', timeout=10)"]
+      interval: 15s
+      timeout: 20s
+      retries: 5
+      start_period: 40s
+    restart: unless-stopped
+    networks:
+      - video_platform_net
+
+  ffmpeg:
+    build:
+      context: ./backend/ffmpeg_service
+    container_name: video-platform-ffmpeg
+    env_file:
+      - .env
+    environment:
+      DATABASE_URL: postgresql+asyncpg://postgres:postgres@postgres:5432/video_platform
+      KAFKA_BOOTSTRAP_SERVERS: kafka:29092
+      KAFKA_MAX_POLL_INTERVAL_MS: ${KAFKA_MAX_POLL_INTERVAL_MS:-3600000}
+      KAFKA_SESSION_TIMEOUT_MS: ${KAFKA_SESSION_TIMEOUT_MS:-45000}
+      KAFKA_HEARTBEAT_INTERVAL_MS: ${KAFKA_HEARTBEAT_INTERVAL_MS:-15000}
+      REDIS_URL: redis://redis:6379/0
+      STORAGE_BACKEND: ${STORAGE_BACKEND:-local}
+      LOCAL_MEDIA_ROOT: /worker/media
+    volumes:
+      - ./backend/media:/worker/media
+      - recordings:/tmp   # 🔥 shared with egress
+    depends_on:
+      kafka:
+        condition: service_healthy
+    restart: unless-stopped
+    networks:
+      - video_platform_net
+
+  # ---------------- DATABASE ----------------
+  postgres:
+    image: postgres:15
+    container_name: video-platform-postgres
+    environment:
+      POSTGRES_DB: video_platform
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+    volumes:
+      - pg_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d video_platform"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+    networks:
+      - video_platform_net
+
+  # ---------------- REDIS ----------------
+  redis:
+    image: redis:7
+    container_name: video-platform-redis
+    restart: unless-stopped
+    networks:
+      - video_platform_net
+
+  # ---------------- ZOOKEEPER ----------------
+  zookeeper:
+    image: confluentinc/cp-zookeeper:7.5.0
+    container_name: video-platform-zookeeper
+    environment:
+      ZOOKEEPER_CLIENT_PORT: 2181
+    healthcheck:
+      test: ["CMD", "bash", "-c", "echo ruok | nc localhost 2181"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+    networks:
+      - video_platform_net
+
+  # ---------------- KAFKA ----------------
+  kafka:
+    image: confluentinc/cp-kafka:7.5.0
+    container_name: video-platform-kafka
+    depends_on:
+      zookeeper:
+        condition: service_healthy
+    environment:
+      KAFKA_BROKER_ID: 1
+      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
+
+      # ✅ stable listener config
+      KAFKA_LISTENERS: PLAINTEXT://0.0.0.0:29092
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:29092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
+
+    healthcheck:
+      test: ["CMD-SHELL", "cub kafka-ready -b localhost:29092 1 30"]
+      interval: 15s
+      timeout: 60s
+      retries: 10
+      start_period: 60s
+
+    restart: unless-stopped
+    networks:
+      - video_platform_net
+
+  # ---------------- LIVEKIT ----------------
+  livekit:
+    image: livekit/livekit-server
+    container_name: video-platform-livekit
+    command: --config /etc/livekit.yaml
+    volumes:
+      - ./infra/livekit/livekit.runtime.yaml:/etc/livekit.yaml
+    depends_on:
+      - redis
+    ports:
+      - "7880:7880"
+      - "7881:7881"
+      - "50000-50100:50000-50100/udp"
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "-", "http://localhost:7880/"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+    restart: unless-stopped
+    networks:
+      - video_platform_net
+
+  # ---------------- EGRESS (RECORDING) ----------------
+  livekit-egress:
+    image: livekit/egress
+    container_name: video-platform-egress
+    command: --config /etc/egress.yaml
+    environment:
+      LIVEKIT_API_KEY: devkey
+      LIVEKIT_API_SECRET: 1f221b798295dde71aa319ed2ca5b8615712d96e89fe5dc38c82f0333a6fe135
+      LIVEKIT_WS_URL: ws://livekit:7880
+      EGRESS_CONFIG_FILE: /etc/egress.yaml
+    cap_add:
+      - SYS_ADMIN
+    network_mode: "service:livekit"
+    volumes:
+      - ./infra/livekit/egress.yaml:/etc/egress.yaml
+      - recordings:/tmp   # 🔥 shared with ffmpeg
+    depends_on:
+      livekit:
+        condition: service_healthy
+      redis:
+        condition: service_started
+    restart: unless-stopped
+
+# ---------------- NETWORK ----------------
+networks:
+  video_platform_net:
+    driver: bridge
+
+# ---------------- VOLUMES ----------------
+volumes:
+  pg_data:
+  recordings:

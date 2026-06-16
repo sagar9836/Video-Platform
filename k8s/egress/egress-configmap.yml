@@ -1,0 +1,8 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: egress-config
+  namespace: video-platform
+data:
+  egress.yaml: |
+    api_key: devkey
