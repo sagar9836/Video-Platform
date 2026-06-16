@@ -1,5 +1,5 @@
 pipeline {
-    agent { label 'agent-1' }
+    agent any
 
     environment {
         IMAGE_NAME = "9836sagar9836/video-api"
