@@ -48,30 +48,30 @@ pipeline {
             }
         }
 
-        // stage('Deploy to Kubernetes') {
-        //     steps {
-        //         withCredentials([
-        //             file(credentialsId: 'kubeconfig', variable: 'KUBECONFIG')
-        //         ]) {
-        //             sh '''
-        //                 kubectl set image deployment/api \
-        //                 api=$BACKEND_IMAGE:$TAG \
-        //                 -n video-platform
+        stage('Deploy to Kubernetes') {
+            steps {
+                withCredentials([
+                    file(credentialsId: 'kubeconfig', variable: 'KUBECONFIG')
+                ]) {
+                    sh '''
+                        kubectl set image deployment/api \
+                        api=$BACKEND_IMAGE:$TAG \
+                        -n video-platform
 
-        //                 kubectl set image deployment/frontend \
-        //                 frontend=$FRONTEND_IMAGE:$TAG \
-        //                 -n video-platform
+                        kubectl set image deployment/frontend \
+                        frontend=$FRONTEND_IMAGE:$TAG \
+                        -n video-platform
 
-        //                 kubectl set image deployment/ffmpeg-worker \
-        //                 ffmpeg=$FFMPEG_IMAGE:$TAG \
-        //                 -n video-platform
+                        kubectl set image deployment/ffmpeg-worker \
+                        ffmpeg=$FFMPEG_IMAGE:$TAG \
+                        -n video-platform
 
-        //                 kubectl rollout status deployment/api -n video-platform
-        //                 kubectl rollout status deployment/frontend -n video-platform
-        //                 kubectl rollout status deployment/ffmpeg-worker -n video-platform
-        //             '''
-        //         }
-        //     }
-        // }
+                        kubectl rollout status deployment/api -n video-platform
+                        kubectl rollout status deployment/frontend -n video-platform
+                        kubectl rollout status deployment/ffmpeg-worker -n video-platform
+                    '''
+                }
+            }
+        }
     }
 }
